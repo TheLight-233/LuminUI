@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>LuminUI</RootNamespace>
+    <AssemblyName>LuminUI</AssemblyName>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PackageId>LuminUI</PackageId>
+    <Version>1.0.0</Version>
+    <Description>Zero-allocation hot-path MVR UI framework with compile-time reactive binding.</Description>
+    <PackageTags>ui;mvr;reactive;source-generator;unity;aot;il2cpp</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageOutputPath>..\..\artifacts\packages</PackageOutputPath>
+    <!-- 抑制缺失 XML 注释告警，保持核心库零外部依赖（除 LuminTask/LuminDelegate） -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LuminTask" />
+  </ItemGroup>
+
+  <!-- 源生成器作为分析器引用 -->
+  <ItemGroup>
+    <ProjectReference Include="..\LuminUI.Generator\LuminUI.Generator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\docs\**\*.md" Pack="true" PackagePath="docs\%(RecursiveDir)%(Filename)%(Extension)" />
+    <None Include="..\..\samples\LuminUI.Samples.Inventory\*.cs"
+          Pack="true"
+          PackagePath="samples\LuminUI.Samples.Inventory" />
+    <None Include="..\LuminUI.Generator\bin\$(Configuration)\netstandard2.0\LuminUI.Generator.dll"
+          Pack="true"
+          PackagePath="analyzers\dotnet\cs"
+          Visible="false" />
+  </ItemGroup>
+
+</Project>
