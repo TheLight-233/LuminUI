@@ -20,7 +20,7 @@ namespace LuminUI
         public float Height;
     }
 
-    // 每个屏类型的注册元数据 + View 实例池 + Reactive 上下文池。
+    // 每个屏类型的注册元数据 + View 实例池。
     public sealed class ScreenMeta
     {
         public readonly string ResourceName;
@@ -34,19 +34,12 @@ namespace LuminUI
         public readonly float X, Y, Width, Height;
 
         public bool CanPool => PoolCapacity > 0;
-        public bool HasReactive => _reactiveFactory != null;
-
         private readonly Func<LuminView> _viewFactory;
-        private readonly Func<LuminReactive>? _reactiveFactory;
 
         private Queue<(LuminView view, object root)>? _pool;
-        private Stack<LuminReactive>? _reactivePool;
-
-        private const int ReactivePoolCap = 16;
 
         public ScreenMeta(in ScreenOptions opt,
-                          Func<LuminView> viewFactory,
-                          Func<LuminReactive>? reactiveFactory)
+                          Func<LuminView> viewFactory)
         {
             ResourceName = string.IsNullOrEmpty(opt.ResourceName) ? "" : opt.ResourceName!;
             Layer = opt.Layer;
@@ -61,28 +54,9 @@ namespace LuminUI
             Width = opt.Width;
             Height = opt.Height;
             _viewFactory = viewFactory ?? throw new ArgumentNullException(nameof(viewFactory));
-            _reactiveFactory = reactiveFactory;
         }
 
         internal LuminView CreateView() => _viewFactory();
-
-        internal LuminReactive? RentReactive(object model)
-        {
-            if (_reactiveFactory == null) return null;
-            var reactive = _reactivePool != null && _reactivePool.Count > 0
-                ? _reactivePool.Pop()
-                : _reactiveFactory();
-            reactive.__Attach(model);
-            return reactive;
-        }
-
-        internal void ReturnReactive(LuminReactive reactive)
-        {
-            reactive.__Detach();
-            if (_reactiveFactory == null) return;
-            _reactivePool ??= new Stack<LuminReactive>();
-            if (_reactivePool.Count < ReactivePoolCap) _reactivePool.Push(reactive);
-        }
 
         internal bool TryRentFromPool(out LuminView view, out object root)
         {
@@ -116,7 +90,6 @@ namespace LuminUI
                     item.view.__DestroyFromPool();
                     unload(item.root);
                 }
-            _reactivePool?.Clear();
         }
     }
 }

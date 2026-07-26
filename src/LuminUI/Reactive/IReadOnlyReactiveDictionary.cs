@@ -8,7 +8,10 @@ namespace LuminUI
         where TKey : notnull
     {
         int Version { get; }
+    }
 
+    internal interface IReactiveDictionaryObserver<TKey, TValue> where TKey : notnull
+    {
         void Observe(
             Action<TKey, TValue> added,
             Action<TKey, TValue> removed,

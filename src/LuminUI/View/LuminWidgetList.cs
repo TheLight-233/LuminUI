@@ -79,16 +79,20 @@ namespace LuminUI
         // 绑定响应式集合：先全量填充，随后增删改清空都做增量刷新。
         public void Bind(IReadOnlyReactiveCollection<TItem> collection)
         {
+            if (collection is not IReactiveCollectionObserver<TItem> observer)
+                throw new ArgumentException(
+                    "Reactive collection does not support LuminUI subscriptions.", nameof(collection));
             Unbind();
             _bound = collection;
             SetItems(collection);
-            collection.Observe(_onAdded, _onRemoved, _onReplaced, _onMoved, _onCleared);
+            observer.Observe(_onAdded, _onRemoved, _onReplaced, _onMoved, _onCleared);
         }
 
         public void Unbind()
         {
             if (_bound == null) return;
-            _bound.Unobserve(_onAdded, _onRemoved, _onReplaced, _onMoved, _onCleared);
+            ((IReactiveCollectionObserver<TItem>)_bound).Unobserve(
+                _onAdded, _onRemoved, _onReplaced, _onMoved, _onCleared);
             _bound = null;
         }
 

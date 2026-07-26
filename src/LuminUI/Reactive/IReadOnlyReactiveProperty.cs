@@ -1,5 +1,3 @@
-using System;
-
 namespace LuminUI
 {
     /// <summary>
@@ -10,9 +8,14 @@ namespace LuminUI
     {
         T Value { get; }
         int Version { get; }
+    }
 
-        void Subscribe(Action<T> handler);
-        void SubscribeNoPush(Action<T> handler);
-        void Unsubscribe(Action<T> handler);
+    // Public read-only projections intentionally hide raw subscription methods.
+    // LuminView owns subscriptions through this internal contract.
+    internal interface IReactivePropertyObserver<T>
+    {
+        void Subscribe(System.Action<T> handler);
+        void SubscribeNoPush(System.Action<T> handler);
+        void Unsubscribe(System.Action<T> handler);
     }
 }

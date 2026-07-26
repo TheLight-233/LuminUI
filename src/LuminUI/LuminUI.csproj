@@ -10,7 +10,7 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <PackageId>LuminUI</PackageId>
     <Version>1.0.0</Version>
-    <Description>Zero-allocation hot-path MVR UI framework with compile-time reactive binding.</Description>
+    <Description>Source-generated Unity MVR framework with read-only reactive models and lifecycle-owned Reactions.</Description>
     <PackageTags>ui;mvr;reactive;source-generator;unity;aot;il2cpp</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -33,9 +33,9 @@
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
     <None Include="..\..\docs\**\*.md" Pack="true" PackagePath="docs\%(RecursiveDir)%(Filename)%(Extension)" />
-    <None Include="..\..\samples\LuminUI.Samples.Inventory\*.cs"
+    <None Include="..\..\samples\LuminUI.Samples.Inventory\**\*.cs"
           Pack="true"
-          PackagePath="samples\LuminUI.Samples.Inventory" />
+          PackagePath="samples\LuminUI.Samples.Inventory\%(RecursiveDir)" />
     <None Include="..\LuminUI.Generator\bin\$(Configuration)\netstandard2.0\LuminUI.Generator.dll"
           Pack="true"
           PackagePath="analyzers\dotnet\cs"

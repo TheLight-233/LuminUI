@@ -1,117 +1,101 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace LuminUIGenerator.Generators
 {
-    /// <summary>生成 MVR Reactive 投影、View 响应绑定及屏幕注册。</summary>
+    /// <summary>
+    /// Generates read-only projections for [LuminModel], structural Widget mounting,
+    /// zero-argument Screen opening, and static runtime registration.
+    /// </summary>
     [Generator]
     internal sealed partial class MvrGenerator : IIncrementalGenerator
     {
+        private static readonly SymbolDisplayFormat NullableTypeFormat =
+            SymbolDisplayFormat.FullyQualifiedFormat.WithMiscellaneousOptions(
+                SymbolDisplayFormat.FullyQualifiedFormat.MiscellaneousOptions
+                | SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
+
         private const string ModelAttr = "LuminUI.Attributes.LuminModelAttribute";
-        private const string ActionAttr = "LuminUI.Attributes.LuminActionAttribute";
         private const string ViewAttr = "LuminUI.Attributes.ViewAttribute";
         private const string ScreenAttr = "LuminUI.Attributes.ScreenAttribute";
-        private const string ObserveAttr = "LuminUI.Attributes.ObserveAttribute";
-        private const string WidgetAttr = "LuminUI.Attributes.UiWidgetAttribute";
-        private const string BindListAttr = "LuminUI.Attributes.BindListAttribute";
+        private const string WidgetAttr = "LuminUI.Attributes.WidgetAttribute";
         private const string BridgeAttr = "LuminUI.Attributes.LuminUIBridgeAttribute";
         private const string LoaderAttr = "LuminUI.Attributes.LuminUILoaderAttribute";
 
-        private static readonly DiagnosticDescriptor MissingModel = new DiagnosticDescriptor(
-            "LUIN100", "MVR view has no model",
-            "'{0}' uses [{1}] but its [View]/[Screen] does not declare a [LuminModel] type",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
+        private static readonly DiagnosticDescriptor ModelMustBePartial = new DiagnosticDescriptor(
+            "LUIN100", "LuminModel must be partial",
+            "Class '{0}' marked [LuminModel] must be declared partial",
+            "LuminUI.Model", DiagnosticSeverity.Error, true);
 
-        private static readonly DiagnosticDescriptor InvalidObserveSource = new DiagnosticDescriptor(
-            "LUIN101", "Invalid observe source",
-            "'{0}' is not a public ReactiveProperty<T> member of model '{1}'",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
+        private static readonly DiagnosticDescriptor ModelFieldMustBePrivate = new DiagnosticDescriptor(
+            "LUIN101", "LuminModel fields must be private",
+            "Field '{0}' in [LuminModel] class '{1}' must be private",
+            "LuminUI.Model", DiagnosticSeverity.Error, true);
 
-        private static readonly DiagnosticDescriptor InvalidObserveSignature = new DiagnosticDescriptor(
-            "LUIN102", "Invalid observe method signature",
-            "Observe method '{0}' must have zero parameters or one matching parameter for every source",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
+        private static readonly DiagnosticDescriptor UnsupportedModelShape = new DiagnosticDescriptor(
+            "LUIN102", "Unsupported LuminModel declaration",
+            "[LuminModel] class '{0}' must be a non-generic top-level class",
+            "LuminUI.Model", DiagnosticSeverity.Error, true);
 
-        private static readonly DiagnosticDescriptor InvalidListBinding = new DiagnosticDescriptor(
-            "LUIN103", "Invalid reactive list binding",
-            "BindList method '{0}' must target a ReactiveCollection<T> and have signature (TWidget, T, int)",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
-
-        private static readonly DiagnosticDescriptor InvalidAction = new DiagnosticDescriptor(
-            "LUIN104", "Invalid reactive action",
-            "LuminAction method '{0}' must be an accessible, non-static, non-generic method",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
-
-        private static readonly DiagnosticDescriptor InvalidModelLink = new DiagnosticDescriptor(
-            "LUIN105", "Invalid MVR model link",
-            "Model type '{0}' used by '{1}' must be marked [LuminModel]",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
-
-        private static readonly DiagnosticDescriptor UnsupportedTypeShape = new DiagnosticDescriptor(
-            "LUIN106", "Unsupported generated type shape",
-            "'{0}' must be a non-abstract, non-generic top-level class for LuminUI generation",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
+        private static readonly DiagnosticDescriptor ProjectionNameConflict = new DiagnosticDescriptor(
+            "LUIN103", "Generated model property name conflicts",
+            "Reactive field '{0}' in model '{1}' would generate property '{2}', which already exists",
+            "LuminUI.Model", DiagnosticSeverity.Error, true);
 
         private static readonly DiagnosticDescriptor InvalidAdapter = new DiagnosticDescriptor(
             "LUIN107", "Invalid UI adapter",
             "'{0}' must be concrete, implement '{1}', and provide a public parameterless constructor",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
-
-        private static readonly DiagnosticDescriptor ReactiveContextMismatch = new DiagnosticDescriptor(
-            "LUIN108", "Widget reactive context mismatch",
-            "Widget '{0}' uses model '{1}', but parent view '{2}' uses model '{3}'",
-            "LuminUI.MVR", DiagnosticSeverity.Error, true);
+            "LuminUI.Runtime", DiagnosticSeverity.Error, true);
 
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
-            var models = context.SyntaxProvider.ForAttributeWithMetadataName(
+            var modelResults = context.SyntaxProvider.ForAttributeWithMetadataName(
                 ModelAttr,
                 static (node, _) => node is ClassDeclarationSyntax,
                 static (ctx, ct) => ExtractModel(ctx, ct));
 
-            context.RegisterSourceOutput(models, static (spc, model) =>
-                spc.AddSource(SafeName(model.Namespace, model.ReactiveName), EmitReactive(model)));
+            context.RegisterSourceOutput(modelResults, static (spc, result) =>
+            {
+                foreach (var diagnostic in result.Diagnostics)
+                    spc.ReportDiagnostic(diagnostic);
+                if (result.Spec != null)
+                    spc.AddSource(SafeName(result.Spec.Namespace, result.Spec.ClassName + ".Model"),
+                        EmitModel(result.Spec));
+            });
 
             var views = context.SyntaxProvider.ForAttributeWithMetadataName(
                     ViewAttr,
                     static (node, _) => node is ClassDeclarationSyntax,
                     static (ctx, ct) => ExtractView(ctx, ct, false))
-                .Where(static view => view != null)
-                .Select(static (view, _) => view!);
+                .Where(static spec => spec != null)
+                .Select(static (spec, _) => spec!);
 
             var screenViews = context.SyntaxProvider.ForAttributeWithMetadataName(
                     ScreenAttr,
                     static (node, _) => node is ClassDeclarationSyntax,
                     static (ctx, ct) => ExtractView(ctx, ct, true))
-                .Where(static view => view != null)
-                .Select(static (view, _) => view!);
+                .Where(static spec => spec != null)
+                .Select(static (spec, _) => spec!);
 
-            context.RegisterSourceOutput(views, static (spc, view) =>
-            {
-                if (view.ModelType != null || view.Observers.Length != 0
-                    || view.Widgets.Length != 0 || view.Lists.Length != 0)
-                    spc.AddSource(SafeName(view.Namespace, view.ClassName + ".Mvr"), EmitView(view));
-            });
-
-            context.RegisterSourceOutput(screenViews, static (spc, view) =>
-            {
-                if (view.ModelType != null || view.Observers.Length != 0
-                    || view.Widgets.Length != 0 || view.Lists.Length != 0)
-                    spc.AddSource(SafeName(view.Namespace, view.ClassName + ".Mvr"), EmitView(view));
-            });
+            context.RegisterSourceOutput(views, static (spc, spec) =>
+                spc.AddSource(SafeName(spec.Namespace, spec.ClassName + ".Widgets"), EmitView(spec)));
+            context.RegisterSourceOutput(screenViews, static (spc, spec) =>
+                spc.AddSource(SafeName(spec.Namespace, spec.ClassName + ".Widgets"), EmitView(spec)));
 
             var screens = context.SyntaxProvider.ForAttributeWithMetadataName(
                     ScreenAttr,
                     static (node, _) => node is ClassDeclarationSyntax,
                     static (ctx, ct) => ExtractScreen(ctx, ct))
-                .Where(static screen => screen != null)
-                .Select(static (screen, _) => screen!);
+                .Where(static spec => spec != null)
+                .Select(static (spec, _) => spec!);
 
             context.RegisterSourceOutput(screens, static (spc, screen) =>
                 spc.AddSource(SafeName(screen.Namespace, screen.ClassName + ".Open"), EmitTypedOpen(screen)));
@@ -125,306 +109,111 @@ namespace LuminUIGenerator.Generators
                 static (node, _) => node is ClassDeclarationSyntax,
                 static (ctx, ct) => ExtractAdapter(ctx, ct, false));
 
-            var runtime = screens.Collect().Combine(bridges.Collect()).Combine(loaders.Collect());
+            context.RegisterSourceOutput(bridges, static (spc, result) =>
+            {
+                if (result.Diagnostic != null) spc.ReportDiagnostic(result.Diagnostic);
+            });
+            context.RegisterSourceOutput(loaders, static (spc, result) =>
+            {
+                if (result.Diagnostic != null) spc.ReportDiagnostic(result.Diagnostic);
+            });
+
+            var validBridges = bridges.Where(static result => result.Spec != null)
+                .Select(static (result, _) => result.Spec!);
+            var validLoaders = loaders.Where(static result => result.Spec != null)
+                .Select(static (result, _) => result.Spec!);
+            var runtime = screens.Collect().Combine(validBridges.Collect()).Combine(validLoaders.Collect());
+
             context.RegisterSourceOutput(runtime, static (spc, input) =>
             {
                 var ((allScreens, allBridges), allLoaders) = input;
-                if (allScreens.Length > 0 || allBridges.Length > 0 || allLoaders.Length > 0)
+                if (allScreens.Length != 0 || allBridges.Length != 0 || allLoaders.Length != 0)
                     spc.AddSource("LuminUIRuntime.g.cs", EmitRuntime(allScreens, allBridges, allLoaders));
             });
-
-            var observeDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    ObserveAttr,
-                    static (node, _) => node is MethodDeclarationSyntax,
-                    static (ctx, ct) => ValidateObserve(ctx, ct))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(observeDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
-
-            var listDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    BindListAttr,
-                    static (node, _) => node is MethodDeclarationSyntax,
-                    static (ctx, ct) => ValidateList(ctx, ct))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(listDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
-
-            var actionDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    ActionAttr,
-                    static (node, _) => node is MethodDeclarationSyntax,
-                    static (ctx, ct) => ValidateAction(ctx, ct))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(actionDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
-
-            var modelDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    ModelAttr,
-                    static (node, _) => node is ClassDeclarationSyntax,
-                    static (ctx, ct) => ValidateGeneratedType(ctx, ct))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(modelDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
-
-            var viewModelDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    ViewAttr,
-                    static (node, _) => node is ClassDeclarationSyntax,
-                    static (ctx, ct) => ValidateModelLink(ctx, ct))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(viewModelDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
-
-            var screenModelDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    ScreenAttr,
-                    static (node, _) => node is ClassDeclarationSyntax,
-                    static (ctx, ct) => ValidateModelLink(ctx, ct))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(screenModelDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
-
-            var widgetDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    WidgetAttr,
-                    static (node, _) => node is VariableDeclaratorSyntax,
-                    static (ctx, ct) => ValidateWidget(ctx, ct))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(widgetDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
-
-            var bridgeDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    BridgeAttr,
-                    static (node, _) => node is ClassDeclarationSyntax,
-                    static (ctx, ct) => ValidateAdapter(ctx, ct, true))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(bridgeDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
-
-            var loaderDiagnostics = context.SyntaxProvider.ForAttributeWithMetadataName(
-                    LoaderAttr,
-                    static (node, _) => node is ClassDeclarationSyntax,
-                    static (ctx, ct) => ValidateAdapter(ctx, ct, false))
-                .Where(static diagnostic => diagnostic != null)
-                .Select(static (diagnostic, _) => diagnostic!);
-            context.RegisterSourceOutput(loaderDiagnostics,
-                static (spc, diagnostic) => spc.ReportDiagnostic(diagnostic));
         }
 
-        private static Diagnostic? ValidateGeneratedType(
-            GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
+        private static ModelResult ExtractModel(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
             var type = (INamedTypeSymbol)ctx.TargetSymbol;
-            bool valid = !type.IsAbstract && !type.IsGenericType && type.ContainingType == null;
-            return valid ? null : Diagnostic.Create(UnsupportedTypeShape,
-                type.Locations.FirstOrDefault(), type.Name);
-        }
+            var syntax = (ClassDeclarationSyntax)ctx.TargetNode;
+            var diagnostics = ImmutableArray.CreateBuilder<Diagnostic>();
 
-        private static Diagnostic? ValidateModelLink(
-            GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            var view = (INamedTypeSymbol)ctx.TargetSymbol;
-            if (view.IsGenericType || view.ContainingType != null)
-                return Diagnostic.Create(UnsupportedTypeShape,
-                    view.Locations.FirstOrDefault(), view.Name);
-            var model = GetModelType(ctx.Attributes.FirstOrDefault());
-            if (model == null || FindAttribute(model, ModelAttr) != null) return null;
-            return Diagnostic.Create(InvalidModelLink, view.Locations.FirstOrDefault(),
-                model.Name, view.Name);
-        }
+            bool validShape = !type.IsGenericType && type.ContainingType == null;
+            if (!validShape)
+                diagnostics.Add(Diagnostic.Create(UnsupportedModelShape,
+                    syntax.Identifier.GetLocation(), type.Name));
 
-        private static Diagnostic? ValidateWidget(
-            GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (ctx.TargetSymbol is not IFieldSymbol field
-                || field.Type is not INamedTypeSymbol widget) return null;
-            var parent = field.ContainingType;
-            var parentAttr = FindAttribute(parent, ScreenAttr) ?? FindAttribute(parent, ViewAttr);
-            var widgetAttr = FindAttribute(widget, ScreenAttr) ?? FindAttribute(widget, ViewAttr);
-            var parentModel = GetModelType(parentAttr);
-            var widgetModel = GetModelType(widgetAttr);
-            if (widgetModel == null || SymbolEqualityComparer.Default.Equals(parentModel, widgetModel)) return null;
-            return Diagnostic.Create(ReactiveContextMismatch, field.Locations.FirstOrDefault(),
-                widget.Name, widgetModel.Name, parent.Name, parentModel?.Name ?? "<none>");
-        }
+            bool partial = syntax.Modifiers.Any(SyntaxKind.PartialKeyword);
+            if (!partial)
+                diagnostics.Add(Diagnostic.Create(ModelMustBePartial,
+                    syntax.Identifier.GetLocation(), type.Name));
 
-        private static Diagnostic? ValidateAdapter(
-            GeneratorAttributeSyntaxContext ctx, CancellationToken ct, bool bridge)
-        {
-            ct.ThrowIfCancellationRequested();
-            var type = (INamedTypeSymbol)ctx.TargetSymbol;
-            string contract = bridge ? "LuminUI.Interface.IUiBridge" : "LuminUI.Interface.IUiLoader";
-            bool implements = type.AllInterfaces.Any(i => i.ToDisplayString() == contract);
-            bool hasCtor = type.InstanceConstructors.Any(c => c.Parameters.Length == 0
-                && c.DeclaredAccessibility == Accessibility.Public);
-            bool valid = !type.IsAbstract && implements && hasCtor;
-            return valid ? null : Diagnostic.Create(InvalidAdapter,
-                type.Locations.FirstOrDefault(), type.Name, contract);
-        }
-
-        private static Diagnostic? ValidateObserve(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (ctx.TargetSymbol is not IMethodSymbol method) return null;
-            var view = method.ContainingType;
-            var viewAttr = FindAttribute(view, ScreenAttr) ?? FindAttribute(view, ViewAttr);
-            var model = GetModelType(viewAttr);
-            if (model == null)
-                return Diagnostic.Create(MissingModel, method.Locations.FirstOrDefault(),
-                    view.Name, "Observe");
-
-            var observe = FindAttribute(method, ObserveAttr);
-            var sources = observe == null ? Array.Empty<string>() : GetStringArrayCtor(observe);
-            var valueTypes = new List<ITypeSymbol>();
-            foreach (var source in sources)
-            {
-                var symbol = model.GetMembers(source).FirstOrDefault();
-                var type = MemberType(symbol) as INamedTypeSymbol;
-                if (type == null || type.TypeArguments.Length != 1
-                    || !type.ConstructedFrom.ToDisplayString().StartsWith(
-                        "LuminUI.ReactiveProperty<", StringComparison.Ordinal))
-                    return Diagnostic.Create(InvalidObserveSource, method.Locations.FirstOrDefault(),
-                        source, model.Name);
-                valueTypes.Add(type.TypeArguments[0]);
-            }
-
-            if (sources.Length == 0 || (method.Parameters.Length != 0
-                && method.Parameters.Length != valueTypes.Count))
-                return Diagnostic.Create(InvalidObserveSignature, method.Locations.FirstOrDefault(), method.Name);
-
-            if (method.Parameters.Length == valueTypes.Count)
-                for (int i = 0; i < valueTypes.Count; i++)
-                    if (!SymbolEqualityComparer.Default.Equals(method.Parameters[i].Type, valueTypes[i]))
-                        return Diagnostic.Create(InvalidObserveSignature,
-                            method.Parameters[i].Locations.FirstOrDefault(), method.Name);
-            return null;
-        }
-
-        private static Diagnostic? ValidateList(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (ctx.TargetSymbol is not IMethodSymbol method) return null;
-            var view = method.ContainingType;
-            var viewAttr = FindAttribute(view, ScreenAttr) ?? FindAttribute(view, ViewAttr);
-            var model = GetModelType(viewAttr);
-            if (model == null)
-                return Diagnostic.Create(MissingModel, method.Locations.FirstOrDefault(),
-                    view.Name, "BindList");
-
-            var attr = FindAttribute(method, BindListAttr);
-            var source = attr != null ? GetStringCtor(attr, 0) : null;
-            var sourceSymbol = source != null ? model.GetMembers(source).FirstOrDefault() : null;
-            var sourceType = MemberType(sourceSymbol) as INamedTypeSymbol;
-            bool valid = sourceType != null && sourceType.TypeArguments.Length == 1
-                && sourceType.ConstructedFrom.ToDisplayString().StartsWith(
-                    "LuminUI.ReactiveCollection<", StringComparison.Ordinal)
-                && method.Parameters.Length == 3
-                && SymbolEqualityComparer.Default.Equals(method.Parameters[1].Type, sourceType.TypeArguments[0])
-                && method.Parameters[2].Type.SpecialType == SpecialType.System_Int32
-                && InheritsLuminView(method.Parameters[0].Type as INamedTypeSymbol);
-            if (!valid) return Diagnostic.Create(InvalidListBinding,
-                method.Locations.FirstOrDefault(), method.Name);
-
-            var cell = (INamedTypeSymbol)method.Parameters[0].Type;
-            var cellAttr = FindAttribute(cell, ScreenAttr) ?? FindAttribute(cell, ViewAttr);
-            var cellModel = GetModelType(cellAttr);
-            if (cellModel != null && !SymbolEqualityComparer.Default.Equals(model, cellModel))
-                return Diagnostic.Create(ReactiveContextMismatch,
-                    method.Parameters[0].Locations.FirstOrDefault(), cell.Name, cellModel.Name,
-                    view.Name, model.Name);
-            return null;
-        }
-
-        private static Diagnostic? ValidateAction(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            if (ctx.TargetSymbol is not IMethodSymbol method) return null;
-            bool valid = !method.IsStatic && !method.IsGenericMethod
-                && method.DeclaredAccessibility != Accessibility.Private;
-            return valid ? null : Diagnostic.Create(InvalidAction,
-                method.Locations.FirstOrDefault(), method.Name);
-        }
-
-        private static bool InheritsLuminView(INamedTypeSymbol? type)
-        {
-            for (var current = type; current != null; current = current.BaseType)
-                if (current.ConstructedFrom.ToDisplayString().StartsWith(
-                    "LuminUI.LuminView", StringComparison.Ordinal)) return true;
-            return false;
-        }
-
-        private static ModelSpec ExtractModel(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
-        {
-            ct.ThrowIfCancellationRequested();
-            var type = (INamedTypeSymbol)ctx.TargetSymbol;
-            var ns = NamespaceOf(type);
-            var members = new List<ReactiveMemberSpec>();
-            var actions = new List<ActionSpec>();
-
+            var fields = new List<ModelFieldSpec>();
+            var generatedNames = new HashSet<string>(StringComparer.Ordinal);
             foreach (var member in type.GetMembers())
             {
                 ct.ThrowIfCancellationRequested();
-                ITypeSymbol? memberType = null;
-                string? memberName = null;
-                if (member is IFieldSymbol field && !field.IsStatic
-                    && field.DeclaredAccessibility == Accessibility.Public)
+                if (member is not IFieldSymbol field || field.IsImplicitlyDeclared) continue;
+
+                if (field.DeclaredAccessibility != Accessibility.Private)
+                    diagnostics.Add(Diagnostic.Create(ModelFieldMustBePrivate,
+                        field.Locations.FirstOrDefault() ?? syntax.Identifier.GetLocation(),
+                        field.Name, type.Name));
+
+                if (field.IsStatic || field.DeclaredAccessibility != Accessibility.Private) continue;
+                if (!TryGetReactiveField(field, out var kind, out var type1, out var type2)) continue;
+
+                string propertyName = FieldToProperty(field.Name);
+                bool conflict = propertyName.Length == 0
+                    || type.GetMembers(propertyName).Length != 0
+                    || !generatedNames.Add(propertyName);
+                if (conflict)
                 {
-                    memberType = field.Type;
-                    memberName = field.Name;
-                }
-                else if (member is IPropertySymbol property && !property.IsStatic
-                         && property.DeclaredAccessibility == Accessibility.Public)
-                {
-                    memberType = property.Type;
-                    memberName = property.Name;
+                    diagnostics.Add(Diagnostic.Create(ProjectionNameConflict,
+                        field.Locations.FirstOrDefault() ?? syntax.Identifier.GetLocation(),
+                        field.Name, type.Name, propertyName));
+                    continue;
                 }
 
-                if (memberType is INamedTypeSymbol named && memberName != null)
-                {
-                    var generic = named.ConstructedFrom.ToDisplayString();
-                    if (generic.StartsWith("LuminUI.ReactiveProperty<", StringComparison.Ordinal)
-                        && named.TypeArguments.Length == 1)
-                    {
-                        members.Add(new ReactiveMemberSpec(memberName, ReactiveKind.Property,
-                            TypeName(named.TypeArguments[0]), null));
-                    }
-                    else if (generic.StartsWith("LuminUI.ReactiveCollection<", StringComparison.Ordinal)
-                             && named.TypeArguments.Length == 1)
-                    {
-                        members.Add(new ReactiveMemberSpec(memberName, ReactiveKind.Collection,
-                            TypeName(named.TypeArguments[0]), null));
-                    }
-                    else if (generic.StartsWith("LuminUI.ReactiveDictionary<", StringComparison.Ordinal)
-                             && named.TypeArguments.Length == 2)
-                    {
-                        members.Add(new ReactiveMemberSpec(memberName, ReactiveKind.Dictionary,
-                            TypeName(named.TypeArguments[0]), TypeName(named.TypeArguments[1])));
-                    }
-                }
-
-                if (member is IMethodSymbol method && !method.IsStatic && !method.IsGenericMethod
-                    && FindAttribute(method, ActionAttr) != null
-                    && method.DeclaredAccessibility != Accessibility.Private)
-                {
-                    var parameters = method.Parameters.Select(static p => new ParameterSpec(
-                        p.Name, TypeName(p.Type), p.RefKind, p.IsParams)).ToArray();
-                    actions.Add(new ActionSpec(method.Name, TypeName(method.ReturnType), parameters));
-                }
+                fields.Add(new ModelFieldSpec(field.Name, propertyName, kind, type1, type2));
             }
 
-            var reactiveName = type.Name.EndsWith("Model", StringComparison.Ordinal)
-                ? type.Name.Substring(0, type.Name.Length - 5) + "Reactive"
-                : type.Name + "Reactive";
-            return new ModelSpec(ns, type.Name, TypeName(type), reactiveName,
-                AccessibilityText(type.DeclaredAccessibility),
-                members.ToArray(), actions.ToArray());
+            ModelSpec? spec = validShape && partial
+                ? new ModelSpec(NamespaceOf(type), type.Name, fields.ToArray())
+                : null;
+            return new ModelResult(spec, diagnostics.ToImmutable());
+        }
+
+        private static bool TryGetReactiveField(IFieldSymbol field, out ReactiveKind kind,
+            out string type1, out string? type2)
+        {
+            kind = default;
+            type1 = string.Empty;
+            type2 = null;
+            if (field.Type is not INamedTypeSymbol named) return false;
+
+            string generic = named.ConstructedFrom.ToDisplayString();
+            if (generic == "LuminUI.ReactiveProperty<T>" && named.TypeArguments.Length == 1)
+            {
+                kind = ReactiveKind.Property;
+                type1 = TypeName(named.TypeArguments[0]);
+                return true;
+            }
+            if (generic == "LuminUI.ReactiveCollection<T>" && named.TypeArguments.Length == 1)
+            {
+                kind = ReactiveKind.Collection;
+                type1 = TypeName(named.TypeArguments[0]);
+                return true;
+            }
+            if (generic == "LuminUI.ReactiveDictionary<TKey, TValue>" && named.TypeArguments.Length == 2)
+            {
+                kind = ReactiveKind.Dictionary;
+                type1 = TypeName(named.TypeArguments[0]);
+                type2 = TypeName(named.TypeArguments[1]);
+                return true;
+            }
+            return false;
         }
 
         private static ViewSpec? ExtractView(
@@ -434,66 +223,19 @@ namespace LuminUIGenerator.Generators
             if (ctx.TargetSymbol is not INamedTypeSymbol type) return null;
             if (fromScreen && FindAttribute(type, ViewAttr) != null) return null;
 
-            var attribute = FindAttribute(type, fromScreen ? ScreenAttr : ViewAttr);
-            var model = GetModelType(attribute);
-            var observers = new List<ObserverSpec>();
             var widgets = new List<WidgetSpec>();
-            var lists = new List<ListSpec>();
-
             foreach (var member in type.GetMembers())
             {
-                ct.ThrowIfCancellationRequested();
-                if (member is IFieldSymbol field)
-                {
-                    var widget = FindAttribute(field, WidgetAttr);
-                    if (widget != null && GetStringCtor(widget, 0) is string path)
-                        widgets.Add(new WidgetSpec(field.Name, TypeName(field.Type), Escape(path)));
-                    continue;
-                }
-
-                if (member is not IMethodSymbol method) continue;
-                var observe = FindAttribute(method, ObserveAttr);
-                if (observe != null && model != null)
-                {
-                    var sources = GetStringArrayCtor(observe);
-                    var sourceSpecs = new List<ObserveSourceSpec>();
-                    foreach (var source in sources)
-                    {
-                        var sourceMember = model.GetMembers(source).FirstOrDefault();
-                        var sourceType = MemberType(sourceMember) as INamedTypeSymbol;
-                        if (sourceType == null || sourceType.TypeArguments.Length != 1) continue;
-                        var generic = sourceType.ConstructedFrom.ToDisplayString();
-                        if (!generic.StartsWith("LuminUI.ReactiveProperty<", StringComparison.Ordinal)) continue;
-                        sourceSpecs.Add(new ObserveSourceSpec(source, TypeName(sourceType.TypeArguments[0])));
-                    }
-                    if (sourceSpecs.Count > 0)
-                        observers.Add(new ObserverSpec(method.Name, method.Parameters.Length,
-                            sourceSpecs.ToArray(), observers.Count));
-                }
-
-                var bindList = FindAttribute(method, BindListAttr);
-                if (bindList != null && model != null && method.Parameters.Length == 3)
-                {
-                    var source = GetStringCtor(bindList, 0);
-                    var container = GetStringCtor(bindList, 1);
-                    var template = GetStringCtor(bindList, 2);
-                    if (source == null || container == null || template == null) continue;
-                    var sourceMember = model.GetMembers(source).FirstOrDefault();
-                    var sourceType = MemberType(sourceMember) as INamedTypeSymbol;
-                    if (sourceType == null || sourceType.TypeArguments.Length != 1
-                        || !sourceType.ConstructedFrom.ToDisplayString().StartsWith(
-                            "LuminUI.ReactiveCollection<", StringComparison.Ordinal)) continue;
-                    int maxIdle = GetNamedInt(bindList, "MaxIdle", 8);
-                    lists.Add(new ListSpec(method.Name, source,
-                        TypeName(method.Parameters[0].Type), TypeName(sourceType.TypeArguments[0]),
-                        Escape(container), Escape(template), maxIdle, lists.Count));
-                }
+                if (member is not IFieldSymbol field) continue;
+                var attribute = FindAttribute(field, WidgetAttr);
+                string? path = attribute == null ? null : GetStringCtor(attribute, 0);
+                if (path != null)
+                    widgets.Add(new WidgetSpec(field.Name, TypeName(field.Type), Escape(path)));
             }
 
-            string? modelType = model != null ? TypeName(model) : null;
-            string? reactiveType = model != null ? ReactiveTypeName(model) : null;
-            return new ViewSpec(NamespaceOf(type), type.Name, AccessibilityText(type.DeclaredAccessibility),
-                modelType, reactiveType, observers.ToArray(), widgets.ToArray(), lists.ToArray());
+            return widgets.Count == 0
+                ? null
+                : new ViewSpec(NamespaceOf(type), type.Name, widgets.ToArray());
         }
 
         private static ScreenSpec? ExtractScreen(GeneratorAttributeSyntaxContext ctx, CancellationToken ct)
@@ -502,73 +244,63 @@ namespace LuminUIGenerator.Generators
             if (ctx.TargetSymbol is not INamedTypeSymbol type) return null;
             var attribute = FindAttribute(type, ScreenAttr);
             if (attribute == null) return null;
-            var model = GetModelType(attribute);
+
             return new ScreenSpec(
-                NamespaceOf(type), type.Name, TypeName(type), AccessibilityText(type.DeclaredAccessibility),
-                model != null ? TypeName(model) : null,
-                model != null ? ReactiveTypeName(model) : null,
+                NamespaceOf(type), type.Name, TypeName(type),
                 GetNamedString(attribute, "Name") ?? type.Name,
-                EnumName(GetNamedInt(attribute, "Layer", 100), true),
-                EnumName(GetNamedInt(attribute, "Mode", 0), false),
+                LayerName(GetNamedInt(attribute, "Layer", 100)),
+                ModeName(GetNamedInt(attribute, "Mode", 0)),
                 GetNamedInt(attribute, "PoolSize", 1),
                 GetNamedBool(attribute, "Modal", false),
                 GetNamedBool(attribute, "CloseOnClickMask", false),
                 GetNamedFloat(attribute, "MaskOpacity", 0.5f),
                 GetNamedBool(attribute, "HideWhenCovered", true),
-                GetNamedFloat(attribute, "X", 0f), GetNamedFloat(attribute, "Y", 0f),
-                GetNamedFloat(attribute, "Width", 0f), GetNamedFloat(attribute, "Height", 0f));
+                GetNamedFloat(attribute, "X", 0f),
+                GetNamedFloat(attribute, "Y", 0f),
+                GetNamedFloat(attribute, "Width", 0f),
+                GetNamedFloat(attribute, "Height", 0f));
         }
 
-        private static AdapterSpec ExtractAdapter(
+        private static AdapterResult ExtractAdapter(
             GeneratorAttributeSyntaxContext ctx, CancellationToken ct, bool bridge)
         {
             ct.ThrowIfCancellationRequested();
-            return new AdapterSpec(TypeName((INamedTypeSymbol)ctx.TargetSymbol), bridge);
+            var type = (INamedTypeSymbol)ctx.TargetSymbol;
+            string contract = bridge ? "LuminUI.Interface.IUiBridge" : "LuminUI.Interface.IUiLoader";
+            bool implements = type.AllInterfaces.Any(i => i.ToDisplayString() == contract);
+            bool hasCtor = type.InstanceConstructors.Any(c => c.Parameters.Length == 0
+                && c.DeclaredAccessibility == Accessibility.Public);
+            if (type.IsAbstract || !implements || !hasCtor)
+            {
+                return new AdapterResult(null, Diagnostic.Create(InvalidAdapter,
+                    type.Locations.FirstOrDefault(), type.Name, contract));
+            }
+            return new AdapterResult(new AdapterSpec(TypeName(type), bridge), null);
         }
 
-        private static string EmitReactive(ModelSpec model)
+        private static string EmitModel(ModelSpec model)
         {
             var sb = Header(model.Namespace);
-            sb.AppendLine(model.Accessibility + " sealed class " + model.ReactiveName + " : global::LuminUI.LuminReactive");
+            sb.AppendLine("partial class " + model.ClassName);
             sb.AppendLine("{");
-            sb.AppendLine("    private " + model.FullModelType + "? _model;");
-            sb.AppendLine("    private " + model.FullModelType + " Model => _model ?? throw new global::System.InvalidOperationException(\"Reactive context is detached.\");");
-            sb.AppendLine();
-            foreach (var member in model.Members)
+            foreach (var field in model.Fields)
             {
-                switch (member.Kind)
+                switch (field.Kind)
                 {
                     case ReactiveKind.Property:
-                        sb.AppendLine("    public global::LuminUI.IReadOnlyReactiveProperty<" + member.Type1 + "> " + member.Name + " => Model." + member.Name + ";");
+                        sb.AppendLine("    public global::LuminUI.IReadOnlyReactiveProperty<" + field.Type1
+                            + "> " + field.PropertyName + " => " + field.FieldName + ";");
                         break;
                     case ReactiveKind.Collection:
-                        sb.AppendLine("    public global::LuminUI.IReadOnlyReactiveCollection<" + member.Type1 + "> " + member.Name + " => Model." + member.Name + ";");
+                        sb.AppendLine("    public global::LuminUI.IReadOnlyReactiveCollection<" + field.Type1
+                            + "> " + field.PropertyName + " => " + field.FieldName + ";");
                         break;
                     case ReactiveKind.Dictionary:
-                        sb.AppendLine("    public global::LuminUI.IReadOnlyReactiveDictionary<" + member.Type1 + ", " + member.Type2 + "> " + member.Name + " => Model." + member.Name + ";");
+                        sb.AppendLine("    public global::LuminUI.IReadOnlyReactiveDictionary<" + field.Type1
+                            + ", " + field.Type2 + "> " + field.PropertyName + " => " + field.FieldName + ";");
                         break;
                 }
             }
-            if (model.Actions.Length > 0) sb.AppendLine();
-            foreach (var action in model.Actions)
-            {
-                sb.Append("    public ").Append(action.ReturnType).Append(' ').Append(action.Name).Append('(');
-                for (int i = 0; i < action.Parameters.Length; i++)
-                {
-                    if (i != 0) sb.Append(", ");
-                    AppendParameter(sb, action.Parameters[i]);
-                }
-                sb.Append(") => Model.").Append(action.Name).Append('(');
-                for (int i = 0; i < action.Parameters.Length; i++)
-                {
-                    if (i != 0) sb.Append(", ");
-                    AppendArgument(sb, action.Parameters[i]);
-                }
-                sb.AppendLine(");");
-            }
-            sb.AppendLine();
-            sb.AppendLine("    protected override void OnAttach(object model) => _model = (" + model.FullModelType + ")model;");
-            sb.AppendLine("    protected override void OnDetach() => _model = null;");
             sb.AppendLine("}");
             Footer(sb, model.Namespace);
             return sb.ToString();
@@ -577,84 +309,16 @@ namespace LuminUIGenerator.Generators
         private static string EmitView(ViewSpec view)
         {
             var sb = Header(view.Namespace);
-            sb.AppendLine(view.Accessibility + " partial class " + view.ClassName);
+            sb.AppendLine("partial class " + view.ClassName);
             sb.AppendLine("{");
-            if (view.ReactiveType != null)
+            sb.AppendLine("    public override void __BuildWidgets()");
+            sb.AppendLine("    {");
+            foreach (var widget in view.Widgets)
             {
-                sb.AppendLine("    protected " + view.ReactiveType + " Reactive { get; private set; } = null!;");
-                sb.AppendLine("    public override bool __RequiresReactive => true;");
-                sb.AppendLine("    public override void __SetReactiveObj(global::LuminUI.LuminReactive reactive) => Reactive = (" + view.ReactiveType + ")reactive;");
-                sb.AppendLine("    public override void __ClearReactiveObj() => Reactive = null!;");
-                sb.AppendLine();
+                sb.AppendLine("        " + widget.FieldName + " ??= new " + widget.TypeName + "();");
+                sb.AppendLine("        AddWidget(" + widget.FieldName + ", \"" + widget.Path + "\");");
             }
-
-            foreach (var observer in view.Observers)
-            {
-                for (int i = 0; i < observer.Sources.Length; i++)
-                {
-                    var source = observer.Sources[i];
-                    sb.AppendLine("    private global::System.Action<" + source.ValueType + ">? __obs_" + observer.Ordinal + "_" + i + ";");
-                    sb.AppendLine("    private void __on_" + observer.Ordinal + "_" + i + "(" + source.ValueType + " _) => " + ObserverCall(observer) + ";");
-                }
-            }
-            foreach (var list in view.Lists)
-            {
-                sb.AppendLine("    private global::LuminUI.LuminWidgetList<" + list.WidgetType + ", " + list.ItemType + ">? __list_" + list.Ordinal + ";");
-                sb.AppendLine("    private global::System.Action<" + list.WidgetType + ", " + list.ItemType + ", int>? __listBinder_" + list.Ordinal + ";");
-                sb.AppendLine("    private static " + list.WidgetType + " __createListWidget_" + list.Ordinal + "() => new " + list.WidgetType + "();");
-                sb.AppendLine("    private static readonly global::System.Func<" + list.WidgetType + "> __listFactory_" + list.Ordinal + " = __createListWidget_" + list.Ordinal + ";");
-            }
-
-            if (view.Observers.Length != 0 || view.Lists.Length != 0)
-            {
-                sb.AppendLine();
-                sb.AppendLine("    public override void __WireReactive()");
-                sb.AppendLine("    {");
-                foreach (var observer in view.Observers)
-                {
-                    for (int i = 0; i < observer.Sources.Length; i++)
-                    {
-                        var source = observer.Sources[i];
-                        sb.AppendLine("        __obs_" + observer.Ordinal + "_" + i + " ??= __on_" + observer.Ordinal + "_" + i + ";");
-                        sb.AppendLine("        Reactive." + source.Name + ".SubscribeNoPush(__obs_" + observer.Ordinal + "_" + i + ");");
-                    }
-                    sb.AppendLine("        " + ObserverCall(observer) + ";");
-                }
-                foreach (var list in view.Lists)
-                {
-                    sb.AppendLine("        __listBinder_" + list.Ordinal + " ??= " + list.MethodName + ";");
-                    sb.AppendLine("        if (__list_" + list.Ordinal + " == null)");
-                    sb.AppendLine("            __list_" + list.Ordinal + " = BindList<" + list.WidgetType + ", " + list.ItemType + ">(\"" + list.ContainerPath + "\", \"" + list.TemplatePath + "\", __listFactory_" + list.Ordinal + ", __listBinder_" + list.Ordinal + ", " + list.MaxIdle + ");");
-                    sb.AppendLine("        else RegisterList(__list_" + list.Ordinal + ");");
-                    sb.AppendLine("        __list_" + list.Ordinal + ".Bind(Reactive." + list.Source + ");");
-                }
-                sb.AppendLine("    }");
-                sb.AppendLine();
-                sb.AppendLine("    public override void __UnwireReactive()");
-                sb.AppendLine("    {");
-                foreach (var observer in view.Observers)
-                    for (int i = 0; i < observer.Sources.Length; i++)
-                        sb.AppendLine("        if (__obs_" + observer.Ordinal + "_" + i + " != null) Reactive." + observer.Sources[i].Name + ".Unsubscribe(__obs_" + observer.Ordinal + "_" + i + ");");
-                foreach (var list in view.Lists)
-                {
-                    sb.AppendLine("        __list_" + list.Ordinal + "?.Unbind();");
-                }
-                sb.AppendLine("    }");
-            }
-
-            if (view.Widgets.Length != 0)
-            {
-                sb.AppendLine();
-                sb.AppendLine("    public override void __BuildWidgets()");
-                sb.AppendLine("    {");
-                foreach (var widget in view.Widgets)
-                {
-                    sb.AppendLine("        " + widget.FieldName + " ??= new " + widget.TypeName + "();");
-                    sb.AppendLine("        AddWidget(" + widget.FieldName + ", \"" + widget.Path + "\");");
-                }
-                sb.AppendLine("    }");
-            }
-
+            sb.AppendLine("    }");
             sb.AppendLine("}");
             Footer(sb, view.Namespace);
             return sb.ToString();
@@ -663,18 +327,11 @@ namespace LuminUIGenerator.Generators
         private static string EmitTypedOpen(ScreenSpec screen)
         {
             var sb = Header(screen.Namespace);
-            sb.AppendLine(screen.Accessibility + " partial class " + screen.ClassName);
+            sb.AppendLine("partial class " + screen.ClassName);
             sb.AppendLine("{");
-            if (screen.ModelType != null)
-            {
-                sb.AppendLine("    public static global::LuminThread.LuminTask<global::LuminUI.ScreenHandle<" + screen.FullType + ">> OpenAsync(" + screen.ModelType + " model, global::System.Threading.CancellationToken ct = default)");
-                sb.AppendLine("        => global::LuminUI.LuminUi.OpenAsync<" + screen.FullType + ">(model, ct);");
-            }
-            else
-            {
-                sb.AppendLine("    public static global::LuminThread.LuminTask<global::LuminUI.ScreenHandle<" + screen.FullType + ">> OpenAsync(global::System.Threading.CancellationToken ct = default)");
-                sb.AppendLine("        => global::LuminUI.LuminUi.OpenAsync<" + screen.FullType + ">(null, ct);");
-            }
+            sb.AppendLine("    public static global::LuminThread.LuminTask<global::LuminUI.ScreenHandle<"
+                + screen.FullType + ">> OpenAsync(global::System.Threading.CancellationToken ct = default)");
+            sb.AppendLine("        => global::LuminUI.LuminUi.OpenAsync<" + screen.FullType + ">(ct);");
             sb.AppendLine("}");
             Footer(sb, screen.Namespace);
             return sb.ToString();
@@ -712,81 +369,86 @@ namespace LuminUIGenerator.Generators
                 sb.AppendLine("                X = " + Float(screen.X) + ", Y = " + Float(screen.Y) + ",");
                 sb.AppendLine("                Width = " + Float(screen.Width) + ", Height = " + Float(screen.Height));
                 sb.AppendLine("            },");
-                sb.AppendLine("            () => new " + screen.FullType + "(),");
-                sb.AppendLine(screen.ReactiveType != null
-                    ? "            () => new " + screen.ReactiveType + "());"
-                    : "            null);");
+                sb.AppendLine("            () => new " + screen.FullType + "());");
             }
             sb.AppendLine("    }");
             sb.AppendLine("}");
             return sb.ToString();
         }
 
-        private static string ObserverCall(ObserverSpec observer)
+        private static string FieldToProperty(string fieldName)
         {
-            if (observer.ParameterCount == 0) return observer.MethodName + "()";
-            return observer.MethodName + "(" + string.Join(", ", observer.Sources.Select(static s => "Reactive." + s.Name + ".Value")) + ")";
+            string name = fieldName.TrimStart('_');
+            if (name.StartsWith("m_", StringComparison.Ordinal)) name = name.Substring(2);
+            if (name.Length == 0) return string.Empty;
+            return char.ToUpperInvariant(name[0]) + name.Substring(1);
         }
 
-        private static INamedTypeSymbol? GetModelType(AttributeData? attribute)
-            => attribute != null && attribute.ConstructorArguments.Length > 0
-               && attribute.ConstructorArguments[0].Value is INamedTypeSymbol model ? model : null;
-
-        private static ITypeSymbol? MemberType(ISymbol? member)
-            => member is IFieldSymbol field ? field.Type
-                : member is IPropertySymbol property ? property.Type : null;
-
-        private static string ReactiveTypeName(INamedTypeSymbol model)
+        private static string LayerName(int value)
         {
-            var name = model.Name.EndsWith("Model", StringComparison.Ordinal)
-                ? model.Name.Substring(0, model.Name.Length - 5) + "Reactive"
-                : model.Name + "Reactive";
-            var ns = NamespaceOf(model);
-            return string.IsNullOrEmpty(ns) ? "global::" + name : "global::" + ns + "." + name;
+            switch (value)
+            {
+                case 0: return "Background";
+                case 100: return "Scene";
+                case 200: return "HUD";
+                case 300: return "Popup";
+                case 400: return "Loading";
+                case 500: return "Toast";
+                default: return "Scene";
+            }
+        }
+
+        private static string ModeName(int value)
+        {
+            switch (value)
+            {
+                case 1: return "Stack";
+                case 2: return "Overlay";
+                default: return "Normal";
+            }
         }
 
         private static AttributeData? FindAttribute(ISymbol symbol, string metadataName)
             => symbol.GetAttributes().FirstOrDefault(a => a.AttributeClass?.ToDisplayString() == metadataName);
 
         private static string NamespaceOf(INamedTypeSymbol type)
-            => type.ContainingNamespace.IsGlobalNamespace ? "" : type.ContainingNamespace.ToDisplayString();
+            => type.ContainingNamespace.IsGlobalNamespace ? string.Empty : type.ContainingNamespace.ToDisplayString();
 
         private static string TypeName(ITypeSymbol type)
-            => type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-
-        private static string AccessibilityText(Accessibility accessibility)
-            => accessibility == Accessibility.Public ? "public" : "internal";
+            => type.ToDisplayString(NullableTypeFormat);
 
         private static string? GetStringCtor(AttributeData attr, int index)
-            => attr.ConstructorArguments.Length > index && attr.ConstructorArguments[index].Value is string value
-                ? value : null;
+            => attr.ConstructorArguments.Length > index
+               && attr.ConstructorArguments[index].Value is string value ? value : null;
 
-        private static string[] GetStringArrayCtor(AttributeData attr)
+        private static string? GetNamedString(AttributeData attr, string name)
         {
-            if (attr.ConstructorArguments.Length == 0) return Array.Empty<string>();
-            var arg = attr.ConstructorArguments[0];
-            if (arg.Kind == TypedConstantKind.Array)
-                return arg.Values.Select(static value => value.Value as string).Where(static value => value != null).Select(static value => value!).ToArray();
-            return arg.Value is string single ? new[] { single } : Array.Empty<string>();
+            foreach (var pair in attr.NamedArguments)
+                if (pair.Key == name) return pair.Value.Value as string;
+            return null;
         }
 
         private static int GetNamedInt(AttributeData attr, string name, int fallback)
-            => attr.NamedArguments.FirstOrDefault(kv => kv.Key == name).Value.Value is int value ? value : fallback;
-
-        private static float GetNamedFloat(AttributeData attr, string name, float fallback)
-            => attr.NamedArguments.FirstOrDefault(kv => kv.Key == name).Value.Value is float value ? value : fallback;
+        {
+            foreach (var pair in attr.NamedArguments)
+                if (pair.Key == name && pair.Value.Value != null)
+                    return Convert.ToInt32(pair.Value.Value, CultureInfo.InvariantCulture);
+            return fallback;
+        }
 
         private static bool GetNamedBool(AttributeData attr, string name, bool fallback)
-            => attr.NamedArguments.FirstOrDefault(kv => kv.Key == name).Value.Value is bool value ? value : fallback;
-
-        private static string? GetNamedString(AttributeData attr, string name)
-            => attr.NamedArguments.FirstOrDefault(kv => kv.Key == name).Value.Value as string;
-
-        private static string EnumName(int value, bool layer)
         {
-            if (!layer) return value == 1 ? "Stack" : value == 2 ? "Overlay" : "Normal";
-            return value == 0 ? "Background" : value == 200 ? "HUD" : value == 300 ? "Popup"
-                : value == 400 ? "Loading" : value == 500 ? "Toast" : "Scene";
+            foreach (var pair in attr.NamedArguments)
+                if (pair.Key == name && pair.Value.Value is bool value) return value;
+            return fallback;
+        }
+
+        private static float GetNamedFloat(AttributeData attr, string name, float fallback)
+        {
+            foreach (var pair in attr.NamedArguments)
+                if (pair.Key == name && pair.Value.Value != null)
+                    return Convert.ToSingle(pair.Value.Value, CultureInfo.InvariantCulture);
+            return fallback;
         }
 
         private static StringBuilder Header(string ns)
@@ -808,31 +470,38 @@ namespace LuminUIGenerator.Generators
         }
 
         private static string SafeName(string ns, string name)
-            => (string.IsNullOrEmpty(ns) ? "" : ns.Replace('.', '_') + "_") + name + ".g.cs";
+            => (string.IsNullOrEmpty(ns) ? name : ns + "." + name).Replace('.', '_') + ".g.cs";
 
         private static string Escape(string value)
             => value.Replace("\\", "\\\\").Replace("\"", "\\\"");
 
         private static string Bool(bool value) => value ? "true" : "false";
+
         private static string Float(float value)
-            => value.ToString("0.0###", System.Globalization.CultureInfo.InvariantCulture) + "f";
+            => value.ToString("0.0######", CultureInfo.InvariantCulture) + "f";
 
-        private static void AppendParameter(StringBuilder sb, ParameterSpec parameter)
+        private readonly struct ModelResult
         {
-            if (parameter.IsParams) sb.Append("params ");
-            if (parameter.RefKind == RefKind.Ref) sb.Append("ref ");
-            else if (parameter.RefKind == RefKind.Out) sb.Append("out ");
-            else if (parameter.RefKind == RefKind.In) sb.Append("in ");
-            sb.Append(parameter.TypeName).Append(" @").Append(parameter.Name);
+            public ModelResult(ModelSpec? spec, ImmutableArray<Diagnostic> diagnostics)
+            {
+                Spec = spec;
+                Diagnostics = diagnostics;
+            }
+
+            public ModelSpec? Spec { get; }
+            public ImmutableArray<Diagnostic> Diagnostics { get; }
         }
 
-        private static void AppendArgument(StringBuilder sb, ParameterSpec parameter)
+        private readonly struct AdapterResult
         {
-            if (parameter.RefKind == RefKind.Ref) sb.Append("ref ");
-            else if (parameter.RefKind == RefKind.Out) sb.Append("out ");
-            else if (parameter.RefKind == RefKind.In) sb.Append("in ");
-            sb.Append('@').Append(parameter.Name);
-        }
+            public AdapterResult(AdapterSpec? spec, Diagnostic? diagnostic)
+            {
+                Spec = spec;
+                Diagnostic = diagnostic;
+            }
 
+            public AdapterSpec? Spec { get; }
+            public Diagnostic? Diagnostic { get; }
+        }
     }
 }

@@ -8,7 +8,7 @@ namespace LuminUI
     /// 响应式集合。增删改清空都会发出回调，配合 LuminWidgetList 做增量刷新（不整表重建）。
     /// 回调用四个独立委托而非事件参数对象，避免每次变化的 EventArgs 装箱/分配。
     /// </summary>
-    public sealed class ReactiveCollection<T> : IReadOnlyReactiveCollection<T>
+    public sealed class ReactiveCollection<T> : IReadOnlyReactiveCollection<T>, IReactiveCollectionObserver<T>
     {
         private readonly List<T> _list;
 

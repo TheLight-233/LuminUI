@@ -1,140 +1,140 @@
-# 背包 Sample：从 Model 到界面刷新
+# Inventory Sample
 
-这个示例用于说明 LuminUI 的 MVR 写法，不包含真实平台的 `Loader` 和 `Bridge`。`Controls.cs` 中的 `Button`、`Label` 只是最小占位控件；在 Unity 项目里应由适配层取得真实的 UGUI、UIToolkit 或其他控件。
+这个示例不是单个计数器，而是一套完整的游戏背包结构。所有可见 UI 文本均为英文，便于直接放入未导入中文字体的 Unity 项目。
 
-## 建议阅读顺序
-
-1. `InventoryModel.cs`：先看状态放在哪里，以及三个 `[LuminAction]` 如何修改状态。
-2. `InventoryViews.cs` 的 `InventoryView`：看根 Screen 如何组合 Widget、绑定列表。
-3. 继续看 `InventorySummary`、`InventoryActions`、`InventoryDetails`：分别对应读取状态、发起 Action、显示选中项。
-4. 最后看 `InventoryItemCell` 和 `Controls.cs`：理解 Cell 复用，以及平台控件如何接入生成器。
-
-第一次阅读时可以先忽略排序算法和 `IndexById` 的维护，它们只是背包业务细节。
-
-## 一条完整的数据流
+## 三个职责目录
 
 ```text
-用户点击 Button
-    -> [OnClick] 生成的事件接线
-    -> View 调用 Reactive.UseSelected()
-    -> [LuminAction] 生成的转发调用 InventoryModel.UseSelected()
-    -> Model 修改 ReactiveProperty / ReactiveCollection
-    -> [Observe] 或 [BindList] 收到通知
-    -> 只刷新相关 View / Cell
+Model/
+  InventoryTypes.cs       数据类型
+  InventoryModels.cs      三个响应式 Model
+  InventoryService.cs     跨 Model 业务命令和数据入口
+
+View/
+  Controls.cs              非 Unity 编译用控件
+  InventoryScreenView.cs   主 Screen、Header、分类页签
+  WeaponViews.cs           武器列表、筛选 Widget、武器 Cell
+  EquipmentViews.cs        装备列表、Loadout 和嵌套装备槽
+  ItemViews.cs             消耗品列表和 Cell
+  DetailViews.cs           详情、属性、命令栏、运行时比较 Widget
+
+Reaction/
+  InventoryScreenReactions.cs
+  WeaponReactions.cs
+  EquipmentReactions.cs
+  ItemReactions.cs
+  DetailReactions.cs
 ```
 
-这里没有手写 ViewModel。View 也不直接持有 `InventoryModel`：源生成器会创建一个较窄的 `InventoryReactive` 门面，View 从它读取响应式状态，并通过 Action 请求 Model 改变状态。
+职责固定如下：
 
-## 三类手写代码
+- Model 保存业务状态并提供修改方法，源生成器只向外暴露只读响应属性。
+- View 只声明 Element、Widget、列表结构和 Render 方法，不访问 Model，也不能调用 Subscribe。
+- Reaction 选择 Model、建立订阅、组合展示状态并处理 UI 事件，不需要手写基类、构造、实例化或释放。
 
-### 1. Model：状态与业务规则
-
-`[LuminModel]` 会扫描 `InventoryModel` 的公开响应式成员：
-
-- `ReactiveProperty<T>` 表示一个值，例如金币、容量、当前选中物品；
-- `ReactiveCollection<T>` 表示有顺序、会增删改和移动的物品列表；
-- `ReactiveDictionary<TKey, TValue>` 表示可响应变化的键值映射；本例用它快速查找物品下标；
-- `[LuminAction]` 表示允许 View 调用的业务操作，例如选择、使用和排序。
-
-真正的写权限保留在 Model。生成的 `InventoryReactive` 只向 View 暴露只读响应式接口，并把 Action 强类型转发回 Model。
-
-### 2. Screen 与 Widget：界面结构
-
-`InventoryView` 使用 `[Screen(typeof(InventoryModel))]`，所以它是可打开的根界面，并要求一个 `InventoryModel`。它通过三个 `[UiWidget]` 组成固定子组件，并通过 `[BindList]` 管理动态 Cell：
-
-- `InventorySummary`：观察金币和格数；
-- `InventoryActions`：把按钮点击转换为 Action；
-- `InventoryDetails`：观察当前选中物品；
-- `InventoryItemCell`：由列表创建和复用，用于显示一件物品。
-
-`[View(typeof(InventoryModel))]` 表示响应式子组件。打开一个 `InventoryView` 时，框架为这棵界面树建立一个 `InventoryReactive` 上下文；根 Screen、三个 Widget 和所有活跃 Cell 都共享它。这个共享范围是“一次打开的根 Screen 及其组件树”，不是每个 Widget 各创建一份状态。
-
-`InventoryHelp` 展示了另一种情况：`[Screen]` 没有指定 Model，因此它是纯展示界面，不生成 `Reactive`，打开时也不需要传 Model。
-
-### 3. 渲染方法：只描述“变化后怎么显示”
-
-`[Observe(nameof(InventoryModel.Gold))]` 会生成以下行为：
-
-1. Widget 挂载时调用一次 `ShowGold`，立即显示当前值；
-2. `Gold.Value` 变化后再次调用 `ShowGold`；
-3. Widget 卸载或 Screen 关闭时自动退订。
-
-一个方法也可以同时观察多个值。`ShowSlots` 观察 `UsedSlots` 和 `Capacity`，任意一个变化时都会用两者的最新值刷新。
-
-## 列表为什么不会整表重建
-
-`[BindList(nameof(InventoryModel.Items), ...)]` 生成 `LuminWidgetList<InventoryItemCell, InventoryItem>`，首次绑定时创建当前所需的 Cell，之后按集合通知增量更新：
-
-| Model 中的操作 | 列表行为 | 本例位置 |
-| --- | --- | --- |
-| `Items.Add/Insert` | 从空闲池取一个 Cell，没有才创建 | 构造函数的 `AddInitial` 发生在打开前，因此首次绑定直接显示最终快照 |
-| `Items[index] = value` | 只重新绑定该 Cell | 使用数量大于 1 的物品 |
-| `Items.RemoveAt(index)` | 回收对应 Cell，并更新后续下标 | 用完最后一个物品 |
-| `Items.Move(old, new)` | 移动已有 Cell，并重绑受影响区间 | 按名称排序 |
-| `Items.Clear()` | 回收全部活跃 Cell | 本例未触发，但生成列表已支持 |
-
-`MaxIdle = 12` 表示最多缓存 12 个暂时不用的 Cell。Cell 被复用时，`InventoryItemCell.Show` 会收到新物品，所以它必须重新写入 `_itemId`、名称和数量。
-
-## 哪些代码由源生成器完成
-
-下列内容都不需要手写，也不依赖运行时反射：
-
-- `InventoryReactive`，包括只读状态入口和 `Select`、`UseSelected`、`SortByName` 转发方法；
-- 每个响应式 View 的 `Reactive` 属性及上下文接入；
-- `[UiElement]` 的控件查找与字段赋值；
-- `[OnClick]` 的事件订阅和退订；
-- `[Observe]` 的首次渲染、变化订阅和关闭退订；
-- `[UiWidget]` 的创建、挂载、卸载与复用；
-- `[BindList]` 的集合订阅、增量刷新和 Cell 池；
-- `InventoryView.OpenAsync(InventoryModel)` 与 `InventoryHelp.OpenAsync()`；
-- `LuminUIRuntime.RegisterAll()` 中的 Screen、Bridge、Loader 注册代码。
-
-可以把生成结果大致想成下面这样，但不要在项目中重复手写：
-
-```csharp
-// 仅用于理解，真实代码由生成器输出。
-sealed class InventoryReactive : LuminReactive
-{
-    private InventoryModel _model = null!;
-
-    public IReadOnlyReactiveCollection<InventoryItem> Items => _model.Items;
-    public IReadOnlyReactiveProperty<int> Gold => _model.Gold;
-    public void UseSelected() => _model.UseSelected();
-
-    protected override void OnAttach(object model) => _model = (InventoryModel)model;
-    protected override void OnDetach() => _model = null!;
-}
-
-partial class InventoryDetails
-{
-    protected InventoryReactive Reactive { get; private set; }
-
-    // 生成器还会在正确生命周期中订阅、首次调用并退订 ShowSelected。
-}
-```
-
-## 打开界面
-
-平台项目提供并注册好 `Bridge`、`Loader` 后，在启动阶段调用一次：
+## 打开 Screen
 
 ```csharp
 LuminUIRuntime.RegisterAll();
+var handle = await InventoryScreenView.OpenAsync();
 ```
 
-随后用 Model 打开响应式 Screen：
+`OpenAsync` 不接收任何 Model。示例中的 `InventoryContext` 模拟游戏里的背包模块入口。
+
+## 多 Model
+
+示例使用三个独立 Model：
+
+- `InventoryModel`：武器、装备、消耗品、分类、筛选、选中项和容量。
+- `PlayerLoadoutModel`：当前装备的武器、头部、身体、饰品以及总战力。
+- `WalletModel`：金币。
+
+`InventoryHeaderReaction` 同时订阅三个 Model，但 View 不知道这些数据来自哪里：
 
 ```csharp
-var model = new InventoryModel();
-var handle = await InventoryView.OpenAsync(model);
-
-// handle.View 是当前 InventoryView；关闭可使用：
-await handle.CloseAsync();
+protected override void OnBind()
+{
+    Subscribe(InventoryContext.Wallet.Gold, View.RenderGold);
+    Subscribe(InventoryContext.Inventory.UsedSlots, OnUsedSlots);
+    Subscribe(InventoryContext.Inventory.Capacity, OnCapacity);
+    Subscribe(InventoryContext.Loadout.Power, View.RenderPower);
+}
 ```
 
-纯展示 Screen 不需要 Model：
+## Reaction 自动生成
+
+用户只写独立的逻辑类：
 
 ```csharp
-var help = await InventoryHelp.OpenAsync();
+[ReactionFor(typeof(WeaponFilterView))]
+public sealed partial class WeaponFilterReaction
+{
+    protected override void OnBind()
+        => Subscribe(InventoryContext.Inventory.ActiveWeaponFilter, View.RenderFilter);
+
+    [OnClick(nameof(WeaponFilterView.NextFilterButton))]
+    private void NextFilter()
+        => InventoryContext.Inventory.CycleWeaponFilter();
+}
 ```
 
-打开时，`[Observe]` 会先完成首帧数据填充，`[BindList]` 会按 `Items` 当前内容准备 Cell。之后所有刷新都由 Model 的响应式变化驱动。
+生成器负责补全：
+
+- `LuminReaction<WeaponFilterView>` 基类；
+- 缓存的 Reaction 实例；
+- View 打开或 Widget 挂载时 Attach；
+- Close、回池或卸载时 Detach 和统一退订；
+- Reaction 方法到 View Element 的强类型事件连接；
+- Hide 和 Stack Cover 时保持订阅。
+
+## Widget Tree
+
+主 Screen 组合 Header、分类页签、武器、装备、物品和详情 Widget。装备面板继续嵌套：
+
+```text
+InventoryScreenView
+  EquipmentInventoryView
+    EquipmentLoadoutView
+      EquippedWeaponSlotView
+      EquippedHeadSlotView
+      EquippedBodySlotView
+      EquippedAccessorySlotView
+  InventoryDetailView
+    InventoryStatsView
+    InventoryCommandBarView
+```
+
+所有 `[Widget]` 都由生成器创建和挂载，并自动维护 `Parent` / `Children`。
+
+## 列表与 Cell
+
+武器、装备、物品分别使用独立的 `LuminWidgetList`。View 在 `OnInit` 中创建列表结构，Reaction 选择并绑定只读集合：
+
+```csharp
+protected override void OnBind()
+    => View.BindWeapons(InventoryContext.Inventory.VisibleWeapons);
+```
+
+Cell 本身也是 View，并拥有自己的 Reaction。点击 Cell 后，Reaction 读取 Cell 当前渲染的 `ItemId`，再通知 Model 选择该条目。列表增删、替换、移动和清空都会增量更新，Cell 会随列表池复用。
+
+## 详情与业务命令
+
+`InventoryDetailView` 只渲染名称、类型、描述和稀有度。它下面的 `InventoryStatsView` 单独渲染攻击、防御、数量和效果。
+
+`InventoryCommandBarReaction` 同时读取选中项、金币和容量，用于决定 Equip、Use、Upgrade 和 Expand Capacity 是否可用。真正的跨 Model 业务由 `InventoryService` 完成，Reaction 不直接实现扣金币、升级和换装规则。
+
+## 运行时 Widget 和动态订阅
+
+`InventoryComparisonView` 不是 `[Widget]` 字段，而是在主 Screen 的 `OnInit` 中运行时挂载。Screen 从池中重新打开时会复用同一个实例并重新加入 UI Tree。
+
+它的 Reaction 同时观察当前选中项和四个装备槽，并根据条目类型选择正确的比较目标。Toggle Live 按钮演示运行时取消和恢复订阅：恢复时会立即推送最新值。
+
+分类切换和比较面板显示隐藏只改变 Widget 可见性，不会取消 Reaction；只有 Close、回池和真正卸载才会 Detach。
+
+## 编译验证
+
+```bash
+dotnet build samples/LuminUI.Samples.Inventory/LuminUI.Samples.Inventory.csproj -c Release
+```
+
+该项目不依赖 Unity。`View/Controls.cs` 只是最小控件契约，Unity 项目由 `IUiBridge` 返回真实的 UGUI 或 TMP 组件。

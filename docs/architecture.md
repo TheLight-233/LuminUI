@@ -1,42 +1,149 @@
-# MVR architecture
+# Architecture
 
-## 数据方向
+## 单向数据流
 
 ```text
-View event -> generated Reactive action -> Model mutation
-                                         |
-                                         v
-View render <- generated observer <- ReactiveProperty/Collection/Dictionary
+UI event -> generated bridge -> Reaction -> Model / domain service
+                                           |
+                                           v
+View.Render <- Reaction.Subscribe <- generated read-only Model projection
 ```
 
-Reactive 是每次 Screen 打开时租借的上下文。根 Screen 拥有它；所有相同 Model 的 Widget 和列表 Cell 自动借用。关闭顺序固定为：
+MVR 中的 R 是独立的 Reaction 组件，不是 ViewModel，也不是 View 手动创建的中转对象。
 
-1. 停止 View 的响应订阅；
-2. 卸载 Widget/Cell 树；
-3. 清除各 View 的 Reactive 引用；
-4. Reactive 解除 Model 引用并回池；
-5. View 和根节点按 Screen 配置回池或销毁。
+## Model
 
-## 三类 View
+Model 拥有业务状态和修改权限：
 
-- `[Screen] class X : LuminView`：无 Model 的纯 Screen。
-- `[Screen(typeof(MyModel))]`：拥有生成的 `MyReactive`。
-- `[View(typeof(MyModel))]`：借用父级同一个 `MyReactive` 的 Widget/Cell。
+```csharp
+[LuminModel]
+public sealed partial class PlayerModel
+{
+    private readonly ReactiveProperty<int> _hp = new(100);
+    private readonly ReactiveCollection<BuffData> _buffs = new(16);
 
-纯 `[View]` 只生成节点和事件代码，不被迫接入状态系统。
+    public void TakeDamage(int value)
+        => _hp.Value = Math.Max(0, _hp.Value - value);
+}
+```
 
-## 生成器职责
+生成器规则：
 
-- Model → 只读 Reactive 投影；
-- `[LuminAction]` → 明确允许的动作代理；
-- `[Observe]` → 缓存委托、订阅、一次初始 Render、自动退订；
-- `[UiWidget]` → 自动挂载并继承 Reactive；
-- `[BindList]` → 自动创建池化 Cell 列表并进行增量更新；
-- `[Screen]` → 元数据注册、资源名、强类型 `OpenAsync`；
-- `[UiElement]`/事件特性 → 无反射控件查找和事件接线。
+- 类型必须是非泛型顶层 `partial class`。
+- 所有显式字段必须是 `private`。
+- `ReactiveProperty<T>`、`ReactiveCollection<T>`、`ReactiveDictionary<TKey,TValue>` 分别生成 public 只读投影。
+- 普通实现字段保持私有。
+- 可空引用类型会完整保留，例如 `ReactiveProperty<Item?>` 生成 `IReadOnlyReactiveProperty<Item?>`。
 
-## 0GC 边界
+外部代码只能读取响应状态并调用 Model 或领域 Service 的业务方法。
 
-热路径禁止 EventArgs、反射、LINQ、装箱和临时闭包。容器构造时可传容量，生成器缓存所有实例委托。性能门禁在 `tests/LuminUI.Tests/ReactiveAllocationTests.cs`，独立基准在 `benchmarks/`。
+## View
 
-LuminUI 延续游戏 UI 的主线程模型：Model Action、Reactive 通知和 View 渲染应在平台 UI 主线程执行。容器为此不引入锁及其额外开销；后台任务应先切回主线程再修改 Model。
+View 是被动 UI：
+
+- `[Screen]` 可以通过生成的零参数 `OpenAsync()` 打开。
+- `[View]` 只能作为 Widget 或列表 Cell 挂载。
+- View 声明 Element、Widget、列表结构、运行时 Widget 和 Render 方法。
+- View 不提供 Subscribe API，不选择 Model，不实现跨系统业务规则。
+- 纯展示 View 可以没有 Reaction。
+
+`OnInit` 仍然保留，但只用于创建列表控制器、运行时 Widget 等 UI 结构。
+
+## Reaction
+
+Reaction 是单独文件中的顶层 partial 类型：
+
+```csharp
+[ReactionFor(typeof(PlayerHudView))]
+public sealed partial class PlayerHudReaction
+{
+    protected override void OnBind()
+        => Subscribe(PlayerManager.Instance.Model.Hp, View.RenderHp);
+}
+```
+
+用户不声明基类。生成器产生：
+
+```csharp
+partial class PlayerHudReaction : LuminReaction<PlayerHudView>
+{
+}
+```
+
+Reaction 可以：
+
+- 选择一个或多个 Model 实例；
+- 订阅只读属性、集合、字典和 EventBus；
+- 保存非权威的展示组合缓存；
+- 调用 View 的 internal Render 方法；
+- 处理 `[OnClick]` 等 UI 事件并调用 Model 或领域 Service。
+
+Reaction 不能声明 Reactive 容器，否则会产生 `LUIN204`。业务状态必须回到 Model。
+
+## 生成事件
+
+Reaction 方法可以直接引用目标 View 的 internal Element 字段：
+
+```csharp
+[OnClick(nameof(InventoryView.EquipButton))]
+private void Equip() => InventoryService.EquipSelected();
+```
+
+生成器验证字段存在并带有 `[Element]`，然后在 View 的 Reaction Attach/Detach 中生成强类型事件连接。View 不需要一行转发方法。
+
+## 生命周期
+
+打开 Screen 或挂载 Widget 时：
+
+1. 绑定 Element；
+2. 连接 View 自身事件；
+3. 创建并挂载子 Widget；
+4. 执行 View `OnInit`，完成列表和运行时结构；
+5. Attach 缓存的 Reaction 并执行 `OnBind`。
+
+关闭、回池或卸载时顺序相反：先 Detach Reaction 和事件，再释放列表与子 Widget。
+
+订阅规则：
+
+- `Subscribe` 默认立即推送当前值；
+- `SubscriptionHandle` 可以提前取消；
+- Hide/Cover 保持 Reaction；
+- Close、回池、销毁和 Widget/Cell 卸载自动取消全部订阅；
+- 池化 View 复用同一个 Reaction 对象，再次执行 `OnBind`。
+
+## Widget Tree
+
+`[Widget]` 生成创建和挂载代码，并维护 `Parent` / `Children`。Widget 可以继续声明 Widget，形成嵌套 UI Tree。
+
+运行时组件通过 `AddWidget` 挂载。池化 View 重开时必须再次调用 `AddWidget`，这样旧实例会重新进入 Tree。
+
+`ShowWidget` / `HideWidget` 只改变可见性，不 Detach Reaction。
+
+## 列表
+
+View 在 `OnInit` 创建并注册 `LuminWidgetList`，Reaction 在 `OnBind` 选择集合：
+
+```csharp
+protected override void OnBind()
+    => View.BindItems(BagManager.Instance.Model.Items);
+```
+
+列表负责首次同步、增量更新、Cell 池化和 View 关闭时自动 Unbind。Cell 可以拥有自己的 Reaction。
+
+## 诊断
+
+Reaction 相关编译错误：
+
+- `LUIN200`：Reaction 不是 partial。
+- `LUIN201`：Reaction 不是受支持的顶层具体类型。
+- `LUIN202`：目标不是有效 View。
+- `LUIN203`：一个 View 关联多个 Reaction。
+- `LUIN204`：Reaction 声明 Reactive 状态。
+- `LUIN205`：Reaction 没有可用的无参构造。
+- `LUIN206`：Reaction 事件目标 Element 不存在。
+- `LUIN207`：已有 Reaction 的 View 仍声明事件逻辑。
+- `LUIN208`：Reaction 事件方法签名不受支持。
+
+## 性能边界
+
+生成路径不使用运行时反射。Reaction 每个 View 实例只创建一次；方法组、订阅存储和 UI 事件连接在初始化冷路径建立。已经建立的响应通知链路不创建 EventArgs、不装箱，并由 0 B 分配测试锁定。

@@ -84,17 +84,18 @@ public sealed class ReactiveAllocationTests
     }
 
     [Fact]
-    public async Task GeneratedObserverTree_SteadyStateNotification_AllocatesZeroBytes()
+    public async Task ManualSubscriptionTree_SteadyStateNotification_AllocatesZeroBytes()
     {
         using var scope = new LuminUiTestScope();
         LuminUIRuntime.RegisterAll();
         var model = new CounterModel();
-        var handle = await CounterScreen.OpenAsync(model);
-        model.Count.Value = 4;
+        CounterScreenReaction.Source = model;
+        var handle = await CounterScreen.OpenAsync();
+        model.SetCount(4);
 
         Collect();
         long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < 100_000; i++) handle.View.Increment();
+        for (int i = 0; i < 100_000; i++) model.Increment();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
 
         Assert.Equal(0, allocated);

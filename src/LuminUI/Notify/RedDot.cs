@@ -5,7 +5,7 @@ namespace LuminUI.Notify
     /// <summary>
     /// 红点树节点。每个节点的聚合计数 Count = 自身计数 + 所有子节点 Count 之和；
     /// 叶子节点用 SetCount 设置自身计数，变化沿树自动向上传播。Count 是 ReactiveProperty，
-    /// UI 侧用 view.Bind(node.Count, c =&gt; badge.SetActive(c &gt; 0)) 即可，零反射、变化才通知。
+    /// Reaction 在 OnBind 中 Subscribe(node.Count, View.RenderBadge) 即可。
     /// </summary>
     public sealed class RedDot
     {

@@ -7,7 +7,7 @@ namespace LuminUI
     /// MVR 响应式单值。值变化时通知订阅者，相同值不触发。
     /// Publish/通知路径零分配；订阅用方法组可零闭包。
     /// </summary>
-    public sealed class ReactiveProperty<T> : IReadOnlyReactiveProperty<T>
+    public sealed class ReactiveProperty<T> : IReadOnlyReactiveProperty<T>, IReactivePropertyObserver<T>
     {
         private readonly IEqualityComparer<T> _comparer;
         private T _value;

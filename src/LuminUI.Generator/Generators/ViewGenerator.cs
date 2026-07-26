@@ -21,7 +21,7 @@ namespace LuminUIGenerator.Generators
     {
         private const string ViewAttr      = "LuminUI.Attributes.ViewAttribute";
         private const string ScreenAttr    = "LuminUI.Attributes.ScreenAttribute";
-        private const string UiElementAttr = "LuminUI.Attributes.UiElementAttribute";
+        private const string ElementAttr   = "LuminUI.Attributes.ElementAttribute";
         private const string UiClickEvtAttr= "LuminUI.Attributes.UiClickEventAttribute";
 
         private const string OnClickAttr    = "LuminUI.Attributes.OnClickAttribute";
@@ -114,7 +114,7 @@ namespace LuminUIGenerator.Generators
             {
                 ct.ThrowIfCancellationRequested();
                 if (m is not IFieldSymbol field) continue;
-                var uiElem = FindAttr(field, UiElementAttr);
+                var uiElem = FindAttr(field, ElementAttr);
                 if (uiElem == null) continue;
 
                 var ft        = field.Type as INamedTypeSymbol;
@@ -391,7 +391,7 @@ namespace LuminUIGenerator.Generators
             return null;
         }
 
-        // 兼容 [UiElement(Path="...")]（命名参数）与 [UiElement("...")]（位置参数）两种写法
+        // 兼容 [Element(Path="...")]（命名参数）与 [Element("...")]（位置参数）两种写法
         private static string? GetElementPath(AttributeData a)
         {
             foreach (var kv in a.NamedArguments)

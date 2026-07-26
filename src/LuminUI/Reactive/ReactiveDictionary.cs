@@ -7,7 +7,7 @@ namespace LuminUI
     /// <summary>
     /// 增量响应式字典。预设足够容量后，查询、替换及变化通知热路径不产生托管分配。
     /// </summary>
-    public sealed class ReactiveDictionary<TKey, TValue> : IReadOnlyReactiveDictionary<TKey, TValue>
+    public sealed class ReactiveDictionary<TKey, TValue> : IReadOnlyReactiveDictionary<TKey, TValue>, IReactiveDictionaryObserver<TKey, TValue>
         where TKey : notnull
     {
         private readonly Dictionary<TKey, TValue> _dictionary;

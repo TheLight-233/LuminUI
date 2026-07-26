@@ -32,18 +32,16 @@ namespace LuminUI
 
         // 由生成器在 LuminUIRuntime.RegisterAll() 中调用。
         public static void RegisterScreen<T>(in ScreenOptions opt,
-                                             Func<LuminView> viewFactory,
-                                             Func<LuminReactive>? reactiveFactory = null) where T : LuminView
-            => _metas[typeof(T)] = new ScreenMeta(opt, viewFactory, reactiveFactory);
+                                             Func<LuminView> viewFactory) where T : LuminView
+            => _metas[typeof(T)] = new ScreenMeta(opt, viewFactory);
 
         // 异步打开屏。任意阶段失败/取消都会完整回滚，不留幽灵 Entry、不泄漏 VM/栈节点/根节点/遮罩。
-        public static async LuminTask<ScreenHandle<T>> OpenAsync<T>(object? model = null, CancellationToken ct = default)
+        public static async LuminTask<ScreenHandle<T>> OpenAsync<T>(CancellationToken ct = default)
             where T : LuminView
         {
             ct.ThrowIfCancellationRequested();
             var meta = GetMeta<T>();
 
-            LuminReactive? reactive = null;
             object? root = null;
             object? mask = null;
             LuminView? view = null;
@@ -59,14 +57,6 @@ namespace LuminUI
             {
                 try
                 {
-                    if (meta.HasReactive)
-                    {
-                        if (model == null)
-                            throw new ArgumentNullException(nameof(model),
-                                "[LuminUI] Screen " + typeof(T).Name + " requires a model.");
-                        reactive = meta.RentReactive(model);
-                    }
-
                     // 模态：遮罩拿较低 order，屏拿较高 order
                     int order;
                     if (meta.Modal)
@@ -104,15 +94,12 @@ namespace LuminUI
 
                     view.Layer = meta.Layer;
                     view.Mode = meta.Mode;
-                    view.__AssignReactive(reactive);
-
                     id = Interlocked.Increment(ref _nextId);
                     entry = RentEntry();
                     entry.Completion = new ScreenCompletion();
                     view.__SetScreen(id, entry.Completion);
                     entry.Id = id;
                     entry.View = view;
-                    entry.Reactive = reactive;
                     entry.Root = root!;
                     entry.Mask = mask;
                     entry.Meta = meta;
@@ -164,7 +151,6 @@ namespace LuminUI
                     }
 
                     if (mask != null) GetBridge().Destroy(mask);
-                    if (reactive != null) meta.ReturnReactive(reactive);
                     if (entry != null) ReturnEntry(entry);
                     throw;
                 }
@@ -177,9 +163,9 @@ namespace LuminUI
 
         // 打开并等待返回值（弹窗确认/取消等）。屏内部用 SetResult(...) + Close()。
         public static async LuminTask<TResult?> OpenForResultAsync<TScreen, TResult>(
-            object? model = null, CancellationToken ct = default) where TScreen : LuminView
+            CancellationToken ct = default) where TScreen : LuminView
         {
-            var h = await OpenAsync<TScreen>(model, ct);
+            var h = await OpenAsync<TScreen>(ct);
             return await h.WaitForResultAsync<TResult>();
         }
 
@@ -236,7 +222,6 @@ namespace LuminUI
                 GetLoader().Unload(e.Root);
             }
 
-            if (e.Reactive != null) e.Meta.ReturnReactive(e.Reactive);
             e.Completion.Complete(result);
 
             if (e.Mask != null) GetBridge().Destroy(e.Mask);
@@ -378,7 +363,6 @@ namespace LuminUI
                 var e = kv.Value;
                 var result = e.View.__Result;
                 e.View.__DestroyImmediate();
-                if (e.Reactive != null) e.Meta.ReturnReactive(e.Reactive);
                 e.Completion.Complete(result);
                 try { _loader?.Unload(e.Root); } catch { }
                 if (e.Mask != null) { try { GetBridge().Destroy(e.Mask); } catch { } }
@@ -452,7 +436,6 @@ namespace LuminUI
         {
             public int Id;
             public LuminView View = null!;
-            public LuminReactive? Reactive;
             public ScreenCompletion Completion = null!;
             public object Root = null!;
             public object? Mask;
@@ -469,7 +452,6 @@ namespace LuminUI
             {
                 Id = 0;
                 View = null!;
-                Reactive = null;
                 Completion = null!;
                 Root = null!;
                 Mask = null;

@@ -7,7 +7,10 @@ namespace LuminUI
     public interface IReadOnlyReactiveCollection<T> : IReadOnlyList<T>
     {
         int Version { get; }
+    }
 
+    internal interface IReactiveCollectionObserver<T>
+    {
         void Observe(
             Action<int, T> added,
             Action<int, T> removed,

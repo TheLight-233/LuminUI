@@ -1,88 +1,121 @@
 # LuminUI
 
-**LuminUI 是一个面向游戏与保留式 UI 的高性能 C# MVR（Model · View · Reactive）框架。**
+LuminUI 是面向 Unity 和保留式 UI 的高性能 MVR 框架。
 
-它把 UI 业务状态、控件显示和响应式更新清晰地分开，并通过源生成器在编译期生成绑定、事件与生命周期代码。你可以专注于编写状态和界面逻辑，不必维护字符串路径、手动订阅或手动解绑。
+- **Model**：私有可变状态和业务方法。
+- **View**：Element、Widget、列表结构和 Render 方法。
+- **Reaction**：数据源选择、生命周期订阅、展示状态组合和 UI 事件。
+- **Source Generator**：生成只读 Model 投影、Reaction 宿主、元素与事件接线、Widget Tree、Screen 注册和强类型打开。
 
-LuminUI 不使用反射，也不构建虚拟 DOM；在稳定运行后的属性、集合和字典通知热路径中，以 **0 B 托管分配** 为目标。
+框架不使用运行时反射，不构建虚拟 DOM。响应通知稳定热路径以 **0 B 托管分配**为验收门槛。
 
-## 它解决什么问题？
-
-传统游戏 UI 往往把状态、控件引用、事件注册和生命周期管理混在一起。界面变复杂后，更新遗漏、订阅泄漏和难以追踪的耦合会迅速累积。
-
-LuminUI 为这三个职责建立明确边界：
-
-- **Model**：只保存业务状态，并通过显式 Action 改变状态。
-- **View**：只描述控件如何显示，以及用户交互如何触发 Action。
-- **Reactive**：由生成器提供类型安全的状态访问和通知调度，并自动处理订阅与释放。
-
-每个 Screen 或 Widget 都拥有隔离的 Model；创建、初次刷新、订阅与销毁时的退订由框架生成的代码统一管理。
-
-## 快速感受
-
-先定义状态和操作：
+## 最小示例
 
 ```csharp
 [LuminModel]
-public sealed class CounterModel
+public sealed partial class CounterModel
 {
-    public ReactiveProperty<int> Count { get; } = new(0);
+    private readonly ReactiveProperty<int> _count = new(0);
 
-    [LuminAction]
-    public void Add() => Count.Value++;
+    public void Add() => _count.Value++;
+}
+
+public static class CounterContext
+{
+    public static CounterModel Model { get; } = new();
 }
 ```
 
-然后让 View 关心显示与交互：
+生成器把 `_count` 投影为只读属性：
 
 ```csharp
-[Screen(typeof(CounterModel))]
+public IReadOnlyReactiveProperty<int> Count => _count;
+```
+
+View 不引用 Model，也没有 Subscribe API：
+
+```csharp
+[Screen]
 public partial class CounterView : LuminView
 {
-    [UiElement("Count")]
+    [Element("Count")]
     private Label _count = null!;
 
-    [UiElement("Add")]
-    private Button _add = null!;
+    [Element("Add")]
+    internal Button AddButton = null!;
 
-    [Observe(nameof(CounterModel.Count))]
-    private void ShowCount(int value) => _count.SetInt(value);
-
-    [OnClick(nameof(_add))]
-    private void Add() => Reactive.Add();
+    internal void RenderCount(int value) => _count.SetInt(value);
 }
 ```
 
-注册一次生成的内容后，即可用强类型 API 打开界面：
+Reaction 是独立文件中的逻辑类。用户不写基类、构造、实例化和释放：
+
+```csharp
+[ReactionFor(typeof(CounterView))]
+public sealed partial class CounterReaction
+{
+    protected override void OnBind()
+        => Subscribe(CounterContext.Model.Count, View.RenderCount);
+
+    [OnClick(nameof(CounterView.AddButton))]
+    private void Add() => CounterContext.Model.Add();
+}
+```
+
+生成器为 Reaction 补上 `LuminReaction<CounterView>`，在 View 打开时 Attach，关闭或回池时 Detach，并直接生成按钮事件的 `+=` / `-=` 代码。
+
+打开 Screen 不传 Model：
 
 ```csharp
 LuminUIRuntime.RegisterAll();
-var handle = await CounterView.OpenAsync(new CounterModel());
+var handle = await CounterView.OpenAsync();
 ```
 
-`Count` 改变时，`ShowCount` 会自动收到更新；界面关闭时，相关订阅会自动解除。
+## 生命周期
 
-## 为性能敏感的 UI 而设计
+`Subscribe` 默认立即推送当前值，并返回 `SubscriptionHandle`。Reaction 可以在运行时提前取消或重新订阅。
 
-LuminUI 将高频更新视为一等场景：
+- Hide、Show、Stack Cover 和 Reveal 不会解除订阅。
+- Screen Close、回池、销毁、Widget/Cell 卸载会自动解除全部订阅。
+- 池化 View 再次打开时复用 Reaction 对象并重新执行 `OnBind`。
+- 属性、集合、字典和 EventBus 监听都由 Reaction 生命周期托管。
 
-- `ReactiveProperty<T>` 用于单值状态；
-- `ReactiveCollection<T>` 用于列表的替换、移动和变化通知；
-- `ReactiveDictionary<TKey, TValue>` 用于键值状态；
-- `[Observe]` 的调度代码在编译期生成。
+## 强规则
 
-初始化、首次订阅、委托创建、容量扩张与资源加载属于冷路径；稳定热路径则避免额外托管分配。
+- `[LuminModel]` 必须是顶层非泛型 `partial class`，显式字段必须为 `private`。
+- 一个 View 最多关联一个 `[ReactionFor]`。
+- Reaction 不能声明 `ReactiveProperty`、`ReactiveCollection` 或 `ReactiveDictionary`。
+- View 不能直接 Subscribe；有 Reaction 的 View 不能再声明 `[OnClick]` 等事件方法。
+- 纯展示 View 可以没有 Reaction。
+- Reaction 可以选择任意数量和任意实例的 Model，Screen Open 不携带 Model 图。
 
-## 开始使用
+## Widget Tree
+
+`[Widget]` 由生成器创建和挂载，框架维护 `Parent` / `Children`。Widget 可以继续声明 Widget；运行时可选组件使用 `AddWidget`。显示隐藏只改变节点可见性，不解除 Reaction。
+
+`LuminWidgetList` 管理响应式集合的增量更新和 Cell 池。View 创建列表结构，Reaction 选择并绑定集合。
+
+## 目录
+
+```text
+src/          运行时与 Roslyn 4.3.0 源生成器
+samples/      Model / View / Reaction 三层背包示例
+tests/        生成、生命周期、池化和 0GC 门禁
+benchmarks/   性能与分配基准
+docs/         架构、入门和迁移文档
+```
+
+## 验证
 
 ```bash
-dotnet add package LuminUI
+dotnet restore LuminUI.sln
+dotnet build LuminUI.sln -c Release --no-restore
+dotnet test LuminUI.sln -c Release --no-build
+dotnet run -c Release --project benchmarks/LuminUI.Benchmarks
 ```
 
-该包同时包含运行时和源生成器。你的平台层只需实现并注册 `IUiBridge` 与 `IUiLoader`，用来连接实际 UI 框架的控件与资源加载能力。
-
-完整的背包 UI 示例位于 [LuminUI.Samples.Inventory](samples/LuminUI.Samples.Inventory)。
+完整示例见 `samples/LuminUI.Samples.Inventory`。
 
 ## License
 
-[MIT](LICENSE)
+MIT，见 [LICENSE](LICENSE)。

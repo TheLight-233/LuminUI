@@ -4,9 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using LuminThread;
 using LuminThread.Interface;
-using LuminUI.Event;
 using LuminUI.Interface;
-using LuminUI.Internal;
 using LuminUI.Localization;
 
 namespace LuminUI
@@ -21,6 +19,7 @@ namespace LuminUI
 
         public bool IsOpen => State == LuminViewState.Open || State == LuminViewState.Hidden;
         public bool IsVisible => State == LuminViewState.Open;
+        public bool IsNodeVisible { get; private set; } = true;
         public bool IsClosing => State == LuminViewState.Closing;
 
         // 作为屏打开（true）还是作为组件挂载（false）
@@ -37,19 +36,14 @@ namespace LuminUI
         protected IUiBridge Bridge { get; private set; } = null!;
         protected object Root { get; private set; } = null!;
 
-        private LuminReactive? _reactiveContext;
-
         // 生成器填充
         public virtual void __Bind(IUiBridge bridge, object root) { }
         public virtual void __WireEvents() { }
         public virtual void __UnwireEvents() { }
-        public virtual void __WireReactive() { }
-        public virtual void __UnwireReactive() { }
         public virtual void __BuildWidgets() { }
         public virtual void __ClearWidgets() { }
-        public virtual bool __RequiresReactive => false;
-        public virtual void __SetReactiveObj(LuminReactive reactive) { }
-        public virtual void __ClearReactiveObj() { }
+        public virtual void __AttachReaction() { }
+        public virtual void __DetachReaction() { }
 
 
         // 生命周期钩子
@@ -67,32 +61,27 @@ namespace LuminUI
         protected virtual LuminTask<bool> OnCloseAnimation(CancellationToken ct) => LuminTask.FromResult(true);
 
         // 绑定登记。回池/销毁时统一退订，无内存泄漏。这些列表在视图实例上复用（Clear 而非置空）。
-        private List<(object prop, object handler, Action<object, object> unsub)>? _propSubs;
-        private List<(object handler, Action<object> unsub)>? _eventSubs;
         private List<LuminWidgetListBase>? _lists;
         private List<LuminView>? _children;
 
         public IReadOnlyList<LuminView> Children
             => (IReadOnlyList<LuminView>?)_children ?? Array.Empty<LuminView>();
 
-        // 手动订阅入口；常规代码优先用 [Observe] 让生成器完成订阅与退订。
-        protected void Bind<T>(IReadOnlyReactiveProperty<T> prop, Action<T> onChanged)
-        {
-            _propSubs ??= new List<(object, object, Action<object, object>)>();
-            _propSubs.Add((prop, onChanged, PropHelper<T>.Do));
-            prop.Subscribe(onChanged);
-        }
-
-        // 可选跨系统事件订阅（struct），关闭时自动退订。
-        protected void Listen<T>(Action<T> handler) where T : struct
-        {
-            _eventSubs ??= new List<(object, Action<object>)>();
-            _eventSubs.Add((handler, UnsubHelper<T>.Do));
-            EventBus.Subscribe(handler);
-        }
-
         protected string L(string key) => LocalizationManager.Get(key);
         protected string LFormat(string key, params object[] args) => LocalizationManager.Format(key, args);
+
+        protected void SetWidgetVisible(LuminView widget, bool visible)
+        {
+            if (widget == null) throw new ArgumentNullException(nameof(widget));
+            if (widget.Parent != this)
+                throw new InvalidOperationException("[LuminUI] Widget is not a direct child of this view.");
+            widget.__SetNodeVisible(visible);
+        }
+
+        protected void ShowWidget(LuminView widget) => SetWidgetVisible(widget, true);
+        protected void HideWidget(LuminView widget) => SetWidgetVisible(widget, false);
+
+        public void SetNodeVisible(bool visible) => __SetNodeVisible(visible);
 
         // 在父视图节点下创建并挂载子组件。父 OnInit 中调用，子组件的绑定一并同步完成。
         // 传 new TView() 而非泛型 new()，构造发生在调用处的具体类型，保持零反射、IL2CPP 安全。
@@ -111,9 +100,15 @@ namespace LuminUI
             return widget;
         }
 
+        internal void __SetNodeVisible(bool visible)
+        {
+            IsNodeVisible = visible;
+            if (Root != null) Bridge.SetVisible(Root, visible);
+        }
+
 
         // 可复用 cell 列表（cell 即组件），ReactiveCollection 增量驱动
-        protected LuminWidgetList<TW, TI> BindList<TW, TI>(
+        protected LuminWidgetList<TW, TI> CreateWidgetList<TW, TI>(
             string containerPath, string templatePath,
             Func<TW> factory, Action<TW, TI, int> binder, int maxIdle = 8)
             where TW : LuminView
@@ -204,12 +199,13 @@ namespace LuminUI
             IsRoot = true;
             _covered = false;
             _result = null;
+            IsNodeVisible = true;
             State = LuminViewState.Opening;
             __BindCore(bridge, root);
             __WireEvents();
             __BuildWidgets();
             OnInit();
-            __WireReactive();
+            __AttachReaction();
             await OnOpenAnimation(ct);
             State = LuminViewState.Open;
             EnterLoop();
@@ -258,12 +254,12 @@ namespace LuminUI
 
         private void __Release(bool destroy)
         {
-            __UnwireReactive();
+            __DetachReaction();
             __UnwireEvents();
             __FlushBindings(destroy);
             if (destroy) __ClearWidgets();
-            __ClearReactive();
             State = LuminViewState.None;
+            IsNodeVisible = true;
             _inLoop = false;
             _covered = false;
             _screenId = 0;
@@ -291,13 +287,13 @@ namespace LuminUI
         {
             Parent = parent;
             IsRoot = false;
+            IsNodeVisible = true;
             State = LuminViewState.Opening;
-            __AssignReactive(parent._reactiveContext);
             __BindCore(bridge, root);
             __WireEvents();
             __BuildWidgets();
             OnInit();
-            __WireReactive();
+            __AttachReaction();
             State = LuminViewState.Open;
             OnShow();
         }
@@ -306,11 +302,10 @@ namespace LuminUI
         {
             if (State == LuminViewState.None) return;
             if (State == LuminViewState.Open) OnHide();
-            __UnwireReactive();
+            __DetachReaction();
             __UnwireEvents();
             __FlushBindings(destroy);
             if (destroy) __ClearWidgets();
-            __ClearReactive();
             State = LuminViewState.None;
             Parent = null;
             OnDestroy();
@@ -321,21 +316,6 @@ namespace LuminUI
             Bridge = bridge;
             Root = root;
             __Bind(bridge, root);
-        }
-
-        internal void __AssignReactive(LuminReactive? reactive)
-        {
-            _reactiveContext = reactive;
-            if (!__RequiresReactive) return;
-            if (reactive == null)
-                throw new InvalidOperationException("[LuminUI] View requires reactive context: " + GetType().Name);
-            __SetReactiveObj(reactive);
-        }
-
-        private void __ClearReactive()
-        {
-            if (__RequiresReactive) __ClearReactiveObj();
-            _reactiveContext = null;
         }
 
         // 每帧：自身 OnUpdate 后递归驱动 Open 状态的子组件。
@@ -363,24 +343,6 @@ namespace LuminUI
         // 退订全部绑定、卸载全部子组件、释放全部列表。回池与销毁都会调用。
         internal void __FlushBindings(bool destroy)
         {
-            if (_propSubs != null)
-            {
-                for (int i = 0; i < _propSubs.Count; i++)
-                {
-                    var b = _propSubs[i];
-                    b.unsub(b.prop, b.handler);
-                }
-                _propSubs.Clear();
-            }
-            if (_eventSubs != null)
-            {
-                for (int i = 0; i < _eventSubs.Count; i++)
-                {
-                    var b = _eventSubs[i];
-                    b.unsub(b.handler);
-                }
-                _eventSubs.Clear();
-            }
             if (_lists != null)
             {
                 for (int i = 0; i < _lists.Count; i++)
@@ -396,21 +358,7 @@ namespace LuminUI
                 _children.Clear();
             }
         }
+
     }
 
-    // 手写 Reactive 类型时可用的泛型基类；使用 [View(typeof(Model))]/[Screen(typeof(Model))]
-    // 时源生成器会在普通 LuminView partial 上生成等价代码。
-    public abstract class LuminView<TReactive> : LuminView
-        where TReactive : LuminReactive
-    {
-        protected TReactive Reactive { get; private set; } = null!;
-
-        public override bool __RequiresReactive => true;
-
-        public override void __SetReactiveObj(LuminReactive reactive)
-            => Reactive = (TReactive)reactive;
-
-        public override void __ClearReactiveObj()
-            => Reactive = null!;
-    }
 }

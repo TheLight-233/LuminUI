@@ -3,16 +3,11 @@ using System;
 namespace LuminUI.Attributes
 {
     // 通用视图标记：参与代码生成（字段绑定 / 事件接线）。
-    // 只标 [View] 的视图是“组件”——不可被 LuminUi 打开，只能由父视图 AddWidget 挂载。
+    // 只标 [View] 的视图是组件，不可被 LuminUi 单独打开。
     [AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
     public sealed class ViewAttribute : Attribute
     {
-        public Type? ModelType { get; }
         public string? Name { get; set; }   // 资源名，默认用类名；组件一般不需要单独资源
-
-        public ViewAttribute() { }
-        public ViewAttribute(Type modelType)
-            => ModelType = modelType ?? throw new ArgumentNullException(nameof(modelType));
     }
 
     // 可打开的“屏”：参与代码生成 + 运行时注册（LuminUi.OpenAsync 可开）。
@@ -20,7 +15,6 @@ namespace LuminUI.Attributes
     [AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
     public sealed class ScreenAttribute : Attribute
     {
-        public Type? ModelType { get; }
         public string? Name { get; set; }
         public UILayer Layer { get; set; } = UILayer.Scene;
         public UIMode Mode { get; set; } = UIMode.Normal;
@@ -42,52 +36,30 @@ namespace LuminUI.Attributes
         public float Width { get; set; }          // 覆盖宽度，0 = 用预制体原尺寸
         public float Height { get; set; }         // 覆盖高度，0 = 用预制体原尺寸
 
-        public ScreenAttribute() { }
-        public ScreenAttribute(Type modelType)
-            => ModelType = modelType ?? throw new ArgumentNullException(nameof(modelType));
     }
 
-    // 标记一个 MVR Model，生成器据此产出可共享的只读 Reactive 投影。
+    // 标记响应式 Model。类型必须为 partial，显式字段必须为 private；
+    // 生成器会为私有 Reactive* 字段生成 public 的 IReadOnlyReactive* 属性。
     [AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
     public sealed class LuminModelAttribute : Attribute { }
 
-    /// <summary>显式允许 View 通过生成的 Reactive 投影调用这个 Model Action。</summary>
-    [AttributeUsage(AttributeTargets.Method, Inherited = false, AllowMultiple = false)]
-    public sealed class LuminActionAttribute : Attribute { }
-
-    /// <summary>当一个或多个 Model 响应式成员变化时调用标记的方法。</summary>
-    [AttributeUsage(AttributeTargets.Method, Inherited = false, AllowMultiple = false)]
-    public sealed class ObserveAttribute : Attribute
+    // Associates a top-level partial Reaction with one View. The source generator
+    // supplies the LuminReaction<TView> base class and View lifecycle integration.
+    [AttributeUsage(AttributeTargets.Class, Inherited = false, AllowMultiple = false)]
+    public sealed class ReactionForAttribute : Attribute
     {
-        public string[] Sources { get; }
-        public ObserveAttribute(params string[] sources)
-            => Sources = sources ?? throw new ArgumentNullException(nameof(sources));
+        public Type ViewType { get; }
+        public ReactionForAttribute(Type viewType)
+            => ViewType = viewType ?? throw new ArgumentNullException(nameof(viewType));
     }
 
-    /// <summary>自动在指定路径挂载 Widget；相同 Model 的 Reactive 上下文自动共享。</summary>
+    /// <summary>自动在指定路径挂载 Widget，并跟随父 View 的生命周期卸载。</summary>
     [AttributeUsage(AttributeTargets.Field, Inherited = false, AllowMultiple = false)]
-    public sealed class UiWidgetAttribute : Attribute
+    public sealed class WidgetAttribute : Attribute
     {
         public string Path { get; }
-        public UiWidgetAttribute(string path)
+        public WidgetAttribute(string path)
             => Path = path ?? throw new ArgumentNullException(nameof(path));
-    }
-
-    /// <summary>把 ReactiveCollection 自动连接到可池化 Widget 列表。</summary>
-    [AttributeUsage(AttributeTargets.Method, Inherited = false, AllowMultiple = false)]
-    public sealed class BindListAttribute : Attribute
-    {
-        public string Source { get; }
-        public string ContainerPath { get; }
-        public string TemplatePath { get; }
-        public int MaxIdle { get; set; } = 8;
-
-        public BindListAttribute(string source, string containerPath, string templatePath)
-        {
-            Source = source ?? throw new ArgumentNullException(nameof(source));
-            ContainerPath = containerPath ?? throw new ArgumentNullException(nameof(containerPath));
-            TemplatePath = templatePath ?? throw new ArgumentNullException(nameof(templatePath));
-        }
     }
 
     // 标记桥接实现类型（生成器装配默认桥接，可选）。
@@ -101,11 +73,11 @@ namespace LuminUI.Attributes
     // 标记一个 UI 元素字段，生成器据 Path 在 root 下查找并赋值。
     // Path 同时是后续 Unity 编辑器生成工具的钩子（右键预制体 → 生成字段声明）。
     [AttributeUsage(AttributeTargets.Field, Inherited = false, AllowMultiple = false)]
-    public sealed class UiElementAttribute : Attribute
+    public sealed class ElementAttribute : Attribute
     {
         public string? Path { get; set; }
-        public UiElementAttribute() { }
-        public UiElementAttribute(string path) => Path = path;
+        public ElementAttribute() { }
+        public ElementAttribute(string path) => Path = path;
     }
 
     // 字段类型自带的直连事件名（如 Button → onClick），供生成器识别可直接 += 的事件。
@@ -116,7 +88,7 @@ namespace LuminUI.Attributes
         public UiClickEventAttribute(string eventName) => EventName = eventName;
     }
 
-    // 方法事件标记，Target 为 [UiElement] 字段名。
+    // 方法事件标记，Target 为 [Element] 字段名。
     [AttributeUsage(AttributeTargets.Method, Inherited = false, AllowMultiple = true)]
     public sealed class OnClickAttribute : Attribute { public string Target { get; } public OnClickAttribute(string t) => Target = t; }
 

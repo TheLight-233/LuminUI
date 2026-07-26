@@ -9,27 +9,33 @@ namespace LuminUI.Generator.Tests;
 public sealed class MvrGeneratorTests
 {
     [Fact]
-    public void GeneratesReactiveObserverActionRegistrationAndTypedOpen()
+    public void GeneratesReadOnlyModelProjectionWidgetRegistrationAndZeroArgumentOpen()
     {
         const string source = """
+            #nullable enable
             using LuminUI;
             using LuminUI.Attributes;
 
             namespace Demo;
 
             [LuminModel]
-            public sealed class CounterModel
+            public sealed partial class CounterModel
             {
-                public ReactiveProperty<int> Count { get; } = new(1);
-                [LuminAction] public void Add() => Count.Value++;
+                private readonly ReactiveProperty<int> _count = new(1);
+                private readonly ReactiveProperty<string?> _selected = new(null);
+                private readonly ReactiveCollection<string> _items = new();
+                private readonly ReactiveDictionary<int, string> _byId = new();
+                public void Add() => _count.Value++;
             }
 
-            [Screen(typeof(CounterModel))]
+            [View]
+            public partial class CounterWidget : LuminView { }
+
+            [Screen]
             public partial class CounterView : LuminView
             {
-                [Observe(nameof(CounterModel.Count))]
-                private void Render(int value) { }
-                public void Click() => Reactive.Add();
+                [Widget("Counter")]
+                private CounterWidget _counter = null!;
             }
             """;
 
@@ -37,27 +43,50 @@ public sealed class MvrGeneratorTests
         var generated = string.Join("\n", result.Results.SelectMany(r => r.GeneratedSources)
             .Select(s => s.SourceText.ToString()));
 
-        Assert.Contains("class CounterReactive", generated);
-        Assert.Contains("SubscribeNoPush", generated);
-        Assert.Contains("public static", generated);
-        Assert.Contains("OpenAsync", generated);
+        Assert.Contains("IReadOnlyReactiveProperty", generated);
+        Assert.Contains("Count => _count", generated);
+        Assert.Contains("IReadOnlyReactiveProperty<string?> Selected", generated);
+        Assert.Contains("IReadOnlyReactiveCollection", generated);
+        Assert.Contains("Items => _items", generated);
+        Assert.Contains("IReadOnlyReactiveDictionary", generated);
+        Assert.Contains("ById => _byId", generated);
+        Assert.Contains("AddWidget(_counter, \"Counter\")", generated);
+        Assert.Contains("OpenAsync(global::System.Threading.CancellationToken ct = default)", generated);
         Assert.Contains("RegisterScreen", generated);
+        Assert.DoesNotContain("CounterReactive", generated);
         Assert.DoesNotContain(output.GetDiagnostics(), d => d.Severity == DiagnosticSeverity.Error);
     }
 
     [Fact]
-    public void InvalidObserveSource_ReportsFocusedDiagnostic()
+    public void NonPartialModelReportsDiagnostic()
     {
         const string source = """
             using LuminUI;
             using LuminUI.Attributes;
-            [LuminModel] public sealed class Model
+
+            [LuminModel]
+            public sealed class CounterModel
             {
-                public ReactiveProperty<int> Value { get; } = new();
+                private readonly ReactiveProperty<int> _count = new();
             }
-            [View(typeof(Model))] public partial class BadView : LuminView
+            """;
+
+        var result = Run(source, out _);
+
+        Assert.Contains(result.Diagnostics, d => d.Id == "LUIN100");
+    }
+
+    [Fact]
+    public void NonPrivateFieldReportsDiagnostic()
+    {
+        const string source = """
+            using LuminUI;
+            using LuminUI.Attributes;
+
+            [LuminModel]
+            public sealed partial class CounterModel
             {
-                [Observe("Missing")] private void Render(int value) { }
+                public readonly ReactiveProperty<int> Count = new();
             }
             """;
 
@@ -67,46 +96,23 @@ public sealed class MvrGeneratorTests
     }
 
     [Fact]
-    public void InvalidMvrContracts_ReportActionableDiagnostics()
+    public void GeneratedPropertyConflictReportsDiagnostic()
     {
         const string source = """
             using LuminUI;
             using LuminUI.Attributes;
 
-            public sealed class NotAModel { }
-
-            [LuminModel] public sealed class MainModel
+            [LuminModel]
+            public sealed partial class CounterModel
             {
-                public ReactiveProperty<int> Value { get; } = new();
-                [LuminAction] private void Hidden() { }
+                private readonly ReactiveProperty<int> _count = new();
+                public int Count => 0;
             }
-
-            [LuminModel] public sealed class OtherModel
-            {
-                public ReactiveProperty<int> Value { get; } = new();
-            }
-
-            [View(typeof(OtherModel))] public partial class OtherWidget : LuminView { }
-
-            [View(typeof(MainModel))] public partial class InvalidView : LuminView
-            {
-                [UiWidget("Child")] private OtherWidget _child = null!;
-                [Observe(nameof(MainModel.Value))] private void Render(string value) { }
-                [BindList(nameof(MainModel.Value), "Items", "Template")]
-                private void Bind(OtherWidget cell, int value, int index) { }
-            }
-
-            [View(typeof(NotAModel))] public partial class MissingModelView : LuminView { }
             """;
 
         var result = Run(source, out _);
-        var ids = result.Diagnostics.Select(d => d.Id).ToHashSet();
 
-        Assert.Contains("LUIN102", ids);
-        Assert.Contains("LUIN103", ids);
-        Assert.Contains("LUIN104", ids);
-        Assert.Contains("LUIN105", ids);
-        Assert.Contains("LUIN108", ids);
+        Assert.Contains(result.Diagnostics, d => d.Id == "LUIN103");
     }
 
     private static GeneratorDriverRunResult Run(string source, out Compilation output)
